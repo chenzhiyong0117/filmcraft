@@ -309,6 +309,18 @@ pub fn panel_menu_popup(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
                         let _ = crate::menus::invoke(app, ui.ctx(), "window.floatPanel", serde_json::json!({"panel": p.id()}));
                         close = true;
                     }
+                    // any panel can live in its own window, on any display (macOS, Windows, X11);
+                    // a docked one floats first, so the offer is always there
+                    {
+                        let in_window = app.in_panel_window(p);
+                        let label = if in_window { tl!("Move Panel into Main Window") } else { tl!("Open Panel in New Window") };
+                        let r = ui.button(label);
+                        app.auto.add(&format!("panel.menu.{}.window", p.id()), r.rect, label);
+                        if r.clicked() {
+                            let _ = crate::menus::invoke(app, ui.ctx(), "window.panelWindow", serde_json::json!({"panel": p.id(), "window": !in_window}));
+                            close = true;
+                        }
+                    }
                     let maximized = app.ui.keys.maximized.is_some_and(|q| app.ui.dock.contains(q) || app.ui.floating.iter().any(|g| g.panels.contains(&q)));
                     let r = ui.button(if maximized { tl!("Restore Frame") } else { tl!("Maximize Frame") });
                     app.auto.add(&format!("panel.menu.{}.maximize", p.id()), r.rect, if maximized { "Restore Frame" } else { "Maximize Frame" });

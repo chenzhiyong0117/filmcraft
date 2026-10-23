@@ -56,17 +56,21 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
 
 /// Save the current layout as the saved layout of `name`.
 fn save(app: &mut FilmcraftApp, name: &str) -> Result<(), String> {
-    crate::dock::Layout { root: app.ui.dock.clone(), floating: app.ui.floating.clone() }.validate()?;
+    crate::dock::Layout { root: app.ui.dock.clone(), floating: app.ui.floating.clone(), panel_windows: app.ui.panel_windows.clone() }.validate()?;
     let layout = serde_json::to_value(&app.ui.dock).map_err(|e| e.to_string())?;
     let floating = if app.ui.floating.is_empty() { serde_json::Value::Null } else { serde_json::to_value(&app.ui.floating).map_err(|e| e.to_string())? };
+    // native panel windows keep their place on the desktop (another display)
+    let windows =
+        if app.ui.panel_windows.is_empty() { serde_json::Value::Null } else { serde_json::to_value(&app.ui.panel_windows).map_err(|e| e.to_string())? };
     let mut next = app.workspaces.clone();
     let saved = &mut next.saved;
     match saved.iter_mut().find(|s| s.name == name) {
         Some(s) => {
             s.layout = layout;
             s.floating = floating;
+            s.panel_windows = windows;
         }
-        None => saved.push(dock::SavedWorkspace { name: name.to_string(), layout, floating }),
+        None => saved.push(dock::SavedWorkspace { name: name.to_string(), layout, floating, panel_windows: windows }),
     }
     next.current = name.to_string();
     app.set_workspaces(next)

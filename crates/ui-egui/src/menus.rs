@@ -26,6 +26,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("window.dockPanel", "Dock Panel", [], None),
     uic!("window.floatPanel", "Undock Panel", [], None),
     uic!("window.closePanel", "Close Panel", [], None),
+    uic!("window.panelWindow", "Open in New Window", ["Window"], None),
     uic!("app.language.english", "English", ["Edit", "Language"], None),
     uic!("app.language.japanese", "日本語", ["Edit", "Language"], None),
     uic!("app.language.spanish", "Español", ["Edit", "Language"], None),

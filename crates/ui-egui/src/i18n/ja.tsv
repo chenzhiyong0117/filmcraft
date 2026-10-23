@@ -3578,6 +3578,8 @@
 	Delete Empty Caption Tracks	空のキャプショントラックを削除
 	Dock Panel	パネルをドッキング
 	Undock Panel	パネルのドッキングを解除
+	Open Panel in New Window	パネルを新しいウィンドウで開く
+	Move Panel into Main Window	パネルをメインウィンドウに移動
 	Docking Action	ドッキング操作
 	Resize floating panel	フローティングパネルのサイズを変更
 	Eyedropper (pick a color from the Program monitor)	スポイト (プログラムモニターから色を取得)
