@@ -55,10 +55,12 @@ impl Overlay {
     }
 }
 
-/// The caption face: the track's font family (Inter when empty or not installed) in SemiBold at `px`.
-fn caption_style(font: &str, px: f32) -> TextStyle {
+/// The caption face: the track's font family (Inter when empty or not installed) and weight
+/// (`SemiBold` when the style is empty, the nearest face when the family lacks the named one).
+fn caption_style(font: &str, style: &str, px: f32) -> TextStyle {
     let family = if font.trim().is_empty() { filmcraft_text::fonts::DEFAULT_FAMILY } else { font.trim() };
-    TextStyle { family: family.into(), style: "SemiBold".into(), size: px, ..Default::default() }
+    let style = if style.trim().is_empty() { "SemiBold" } else { style.trim() };
+    TextStyle { family: family.into(), style: style.into(), size: px, ..Default::default() }
 }
 
 fn lin(c: [u8; 4]) -> [f32; 4] {
@@ -118,7 +120,7 @@ pub fn render_caption(c: &Caption, style: &CaptionStyle, w: usize, h: usize) -> 
     let scale = h as f32 / 1080.0;
     let px = (style.size.clamp(4.0, MAX_CAPTION_SIZE_1080) * scale).clamp(4.0, h as f32);
     let max_w = w as f32 * 0.9;
-    let ts = caption_style(&style.font, px);
+    let ts = caption_style(&style.font, &style.style, px);
     let mut lines: Vec<String> = Vec::new();
     // (speaker names are metadata; like Premiere, they are not burned in)
     for l in c.plain_lines() {
@@ -136,26 +138,41 @@ pub fn render_caption(c: &Caption, style: &CaptionStyle, w: usize, h: usize) -> 
     let (line_override, align_override) = vtt_overrides(&c.settings);
     let align = align_override.unwrap_or(style.align);
     let margin = style.margin.clamp(0.0, 0.45) * h as f32;
-    let top = match (line_override, style.anchor) {
+    let anchor_top = match (line_override, style.anchor) {
         (Some(f), _) => (f * h as f32).min(h as f32 - block_h),
         (None, CaptionAnchor::Top) => margin,
         (None, CaptionAnchor::Middle) => (h as f32 - block_h) / 2.0,
         (None, CaptionAnchor::Bottom) => h as f32 - margin - block_h,
-    }
-    .max(0.0)
-    .round();
+    };
+    let outline = (style.outline * scale).clamp(0.0, MAX_OUTLINE_RADIUS);
+    // the text keeps the padding the outline needs; the shadow may reach further, so it grows the
+    // overlay without pushing the glyphs around
+    let edge = outline.ceil() + 1.0;
+    let (sdx, sdy, ssoft) = if style.shadow {
+        ((style.shadow_offset_x * scale).round() as i32, (style.shadow_offset_y * scale).round() as i32, (style.shadow_softness * scale).max(0.0))
+    } else {
+        (0, 0, 0.0)
+    };
+    let reach = if style.shadow { ssoft + sdx.unsigned_abs().max(sdy.unsigned_abs()) as f32 } else { 0.0 };
+    let grow = edge.max(reach.ceil() + 1.0);
+    // the style's nudge moves the whole block; the drawn box (padding and outline included) stays in
+    // the frame, so the overlay never covers pixels outside it
+    let top = (anchor_top + style.offset_y * h as f32).clamp(edge, (h as f32 - block_h - edge).max(edge)).round();
     let side = w as f32 * 0.05;
     let widths: Vec<f32> = lines.iter().map(|l| filmcraft_text::measure(l, &ts)).collect();
     let xs: Vec<f32> = widths
         .iter()
-        .map(|&lw| match align {
-            CaptionAlign::Left => side + pad_x,
-            CaptionAlign::Right => w as f32 - side - pad_x - lw,
-            CaptionAlign::Center => (w as f32 - lw) / 2.0,
+        .map(|&lw| {
+            let x = match align {
+                CaptionAlign::Left => side + pad_x,
+                CaptionAlign::Right => w as f32 - side - pad_x - lw,
+                CaptionAlign::Center => (w as f32 - lw) / 2.0,
+            };
+            x + style.offset_x * w as f32
         })
         .collect();
-    let outline = (style.outline * scale).clamp(0.0, MAX_OUTLINE_RADIUS);
-    let grow = outline.ceil() + 1.0;
+    let inset = pad_x + edge;
+    let xs: Vec<f32> = xs.into_iter().zip(&widths).map(|(x, &lw)| x.clamp(inset, (w as f32 - lw - inset).max(inset))).collect();
     let bx0 = xs.iter().zip(&widths).map(|(x, _)| x - pad_x - grow).fold(f32::MAX, f32::min).floor();
     let bx1 = xs.iter().zip(&widths).map(|(x, lw)| x + lw + pad_x + grow).fold(f32::MIN, f32::max).ceil();
     let by0 = (top - grow).floor();
@@ -195,7 +212,9 @@ pub fn render_caption(c: &Caption, style: &CaptionStyle, w: usize, h: usize) -> 
         cover = m.a;
     }
     let stroke = if outline > 0.0 { dilate(&cover, ow, oh, outline) } else { Vec::new() };
+    let shadow = if style.shadow { blur_shift(&cover, ow, oh, sdx, sdy, ssoft) } else { Vec::new() };
     let (tc, bc, oc) = (lin(style.color), lin(style.background_color), lin(style.outline_color));
+    let sc = lin(style.shadow_color);
     let mut out = vec![0.0f32; ow * oh * 4];
     for j in 0..ow * oh {
         let mut p = [0.0f32; 4];
@@ -207,6 +226,9 @@ pub fn render_caption(c: &Caption, style: &CaptionStyle, w: usize, h: usize) -> 
             }
         };
         over(&mut p, bc, bg[j]);
+        if !shadow.is_empty() {
+            over(&mut p, sc, shadow[j]);
+        }
         if !stroke.is_empty() {
             over(&mut p, oc, stroke[j]);
         }
@@ -214,6 +236,47 @@ pub fn render_caption(c: &Caption, style: &CaptionStyle, w: usize, h: usize) -> 
         out[j * 4..j * 4 + 4].copy_from_slice(&p);
     }
     Some(Overlay { x: ox, y: oy, w: ow, h: oh, px: out })
+}
+
+/// Blur a coverage mask and shift it by (`dx`, `dy`) — the shadow of the glyphs.
+fn blur_shift(m: &[f32], w: usize, h: usize, dx: i32, dy: i32, soft: f32) -> Vec<f32> {
+    let r = soft.round() as i32;
+    let src = if r > 0 { box_blur(m, w, h, r) } else { m.to_vec() };
+    let mut out = vec![0.0f32; w * h];
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let (sx, sy) = (x - dx, y - dy);
+            if sx >= 0 && sy >= 0 && sx < w as i32 && sy < h as i32 {
+                out[y as usize * w + x as usize] = src[sy as usize * w + sx as usize];
+            }
+        }
+    }
+    out
+}
+
+/// Separable box blur with clamped edges — cheap, and indistinguishable from a soft shadow at this size.
+fn box_blur(m: &[f32], w: usize, h: usize, r: i32) -> Vec<f32> {
+    let (mut tmp, mut out) = (vec![0.0f32; w * h], vec![0.0f32; w * h]);
+    let norm = (2 * r + 1) as f32;
+    for y in 0..h {
+        for x in 0..w as i32 {
+            let mut s = 0.0;
+            for d in -r..=r {
+                s += m[y * w + (x + d).clamp(0, w as i32 - 1) as usize];
+            }
+            tmp[y * w + x as usize] = s / norm;
+        }
+    }
+    for y in 0..h as i32 {
+        for x in 0..w {
+            let mut s = 0.0;
+            for d in -r..=r {
+                s += tmp[(y + d).clamp(0, h as i32 - 1) as usize * w + x];
+            }
+            out[y as usize * w + x] = s / norm;
+        }
+    }
+    out
 }
 
 /// Max-filter a coverage mask with a disc of radius `r`.
@@ -357,6 +420,52 @@ mod tests {
     }
 
     #[test]
+    fn shadow_draws_behind_the_text() {
+        // a hard shadow is a copy of the glyphs, offset: black pixels appear where the text is not
+        let st = CaptionStyle {
+            background: false,
+            outline: 0.0,
+            shadow: true,
+            shadow_color: [0, 0, 0, 255],
+            shadow_offset_x: 6.0,
+            shadow_offset_y: 6.0,
+            shadow_softness: 0.0,
+            ..Default::default()
+        };
+        let o = render_caption(&cap("Shadow"), &st, 1920, 1080).unwrap();
+        let at = |x: usize, y: usize| {
+            let j = (y * o.w + x) * 4;
+            [o.px[j], o.px[j + 1], o.px[j + 2], o.px[j + 3]]
+        };
+        // walk down-right from a text pixel until the shadow shows up past the glyphs
+        let mut found = false;
+        for y in 0..o.h {
+            for x in 0..o.w.saturating_sub(8) {
+                let p = at(x, y);
+                // white glyph
+                if p[0] > 0.9 && p[1] > 0.9 && p[3] > 0.9 {
+                    let q = at(x + 8, y + 2);
+                    // black shadow to its right (the glyph may be there too; the shadow is darker)
+                    if q[0] < 0.1 && q[3] > 0.5 {
+                        found = true;
+                    }
+                }
+            }
+        }
+        assert!(found, "offset dark shadow pixels next to the glyphs");
+        // the shadow grows the overlay beyond the text alone
+        let plain = CaptionStyle { shadow: false, ..st.clone() };
+        let b = render_caption(&cap("Shadow"), &plain, 1920, 1080).unwrap();
+        assert!(o.w > b.w && o.h > b.h, "{}x{} vs {}x{}", o.w, o.h, b.w, b.h);
+        // softness blurs the edge: fewer fully opaque shadow pixels than a hard copy
+        let soft = CaptionStyle { shadow_softness: 12.0, ..st.clone() };
+        let s = render_caption(&cap("Shadow"), &soft, 1920, 1080).unwrap();
+        let hard_black = o.px.chunks(4).filter(|p| p[0] < 0.05 && p[3] > 0.9).count();
+        let soft_black = s.px.chunks(4).filter(|p| p[0] < 0.05 && p[3] > 0.9).count();
+        assert!(soft_black < hard_black, "hard {hard_black} soft {soft_black}");
+    }
+
+    #[test]
     fn track_font_is_used() {
         // the style's font used to be ignored (always Inter)
         let inter = render_caption(&cap("Hello world"), &CaptionStyle::default(), 1920, 1080).unwrap();
@@ -366,6 +475,35 @@ mod tests {
         let mono = CaptionStyle { font: "jetbrains mono".into(), ..Default::default() };
         let mono = render_caption(&cap("Hello world"), &mono, 1920, 1080).unwrap();
         assert_ne!((inter.w, &inter.px), (mono.w, &mono.px), "JetBrains Mono renders like Inter");
+    }
+
+    #[test]
+    fn the_track_font_style_reaches_the_face() {
+        // the style name went into the layout as SemiBold before the track could say otherwise
+        let st = CaptionStyle { style: "Regular".into(), ..Default::default() };
+        assert_eq!(caption_style(&st.font, &st.style, 54.0).style, "Regular");
+        let bold = CaptionStyle { style: "Bold".into(), ..Default::default() };
+        assert_eq!(caption_style(&bold.font, &bold.style, 54.0).style, "Bold");
+        // an empty name keeps the historical SemiBold
+        assert_eq!(caption_style("", "", 54.0).style, "SemiBold");
+        assert_eq!(caption_style("Inter", "  ", 54.0).style, "SemiBold");
+    }
+
+    #[test]
+    fn the_style_offsets_move_the_block_inside_the_frame() {
+        let plain = CaptionStyle { background: false, outline: 0.0, ..Default::default() };
+        let base = render_caption(&cap("Hello"), &plain, 1280, 720).unwrap();
+        let up = CaptionStyle { offset_y: -0.3, ..plain.clone() };
+        let up = render_caption(&cap("Hello"), &up, 1280, 720).unwrap();
+        assert!(up.y < base.y, "offset_y -0.3 moves the block up ({} -> {})", base.y, up.y);
+        let right = CaptionStyle { offset_x: 0.2, ..plain.clone() };
+        let right = render_caption(&cap("Hello"), &right, 1280, 720).unwrap();
+        assert!(right.x > base.x, "offset_x 0.2 moves the block right ({} -> {})", base.x, right.x);
+        // a nudge that would leave the frame is clamped, not drawn off-canvas
+        let far = CaptionStyle { offset_x: 1.0, offset_y: 1.0, ..plain.clone() };
+        let far = render_caption(&cap("Hello"), &far, 1280, 720).unwrap();
+        assert!(far.x >= 0 && far.x + far.w as i32 <= 1280, "x inside the frame");
+        assert!(far.y >= 0 && far.y + far.h as i32 <= 720, "y inside the frame");
     }
 
     #[test]

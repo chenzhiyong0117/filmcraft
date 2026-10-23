@@ -285,7 +285,13 @@ fn interact_block(
     }
     if resp.clicked() {
         let add = ctx.input(|i| i.modifiers.command || i.modifiers.shift);
-        actions.push(("captions.select".into(), json!({"captions": [c.id.0], "add": add})));
+        // a plain click selects the block and takes the playhead to it; Cmd/Shift only adds to the
+        // selection, so a multi-selection is not scattered by seeking (#caption-click)
+        if add {
+            actions.push(("captions.select".into(), json!({"captions": [c.id.0], "add": true})));
+        } else {
+            actions.push(("captions.goTo".into(), json!({"caption": c.id.0})));
+        }
     }
     if tr.locked {
         return;
