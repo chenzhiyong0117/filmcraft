@@ -76,6 +76,9 @@ pub enum CaptionAnchor {
 pub struct CaptionStyle {
     /// Font family name (bundled, craft-fonts or system); unknown or empty names fall back to Inter.
     pub font: String,
+    /// Font style/weight name (`Regular`, `Medium`, `SemiBold`, `Bold`, `Italic`, …). A family that
+    /// lacks the named face renders its nearest weight; an empty name means `SemiBold`.
+    pub style: String,
     /// Font size in pixels for a 1080-line frame (scaled with the frame height).
     pub size: f32,
     /// Text colour, sRGB + alpha.
@@ -88,17 +91,33 @@ pub struct CaptionStyle {
     pub anchor: CaptionAnchor,
     /// Distance from the anchored frame edge, as a fraction of the frame height.
     pub margin: f32,
+    /// Horizontal nudge from the aligned position, as a fraction of the frame width (positive = right).
+    /// Clamped so the text stays inside the frame.
+    pub offset_x: f32,
+    /// Vertical nudge from the anchored position, as a fraction of the frame height (positive = down).
+    pub offset_y: f32,
     /// Line height as a multiple of the font size.
     pub line_spacing: f32,
     /// Text outline width in pixels at 1080 lines (0 = none).
     pub outline: f32,
     pub outline_color: [u8; 4],
+    /// Draw a drop shadow behind the text (under the outline and the glyphs).
+    pub shadow: bool,
+    /// Shadow colour, sRGB + alpha.
+    pub shadow_color: [u8; 4],
+    /// Shadow offset in pixels at 1080 lines (positive = right and down).
+    pub shadow_offset_x: f32,
+    /// Shadow offset in pixels at 1080 lines (positive = down).
+    pub shadow_offset_y: f32,
+    /// Shadow softness: the blur radius in pixels at 1080 lines (0 = a hard copy of the glyphs).
+    pub shadow_softness: f32,
 }
 
 impl Default for CaptionStyle {
     fn default() -> Self {
         Self {
             font: "Inter".into(),
+            style: "SemiBold".into(),
             size: 54.0,
             color: [255, 255, 255, 255],
             background: true,
@@ -106,9 +125,16 @@ impl Default for CaptionStyle {
             align: CaptionAlign::Center,
             anchor: CaptionAnchor::Bottom,
             margin: 0.08,
+            offset_x: 0.0,
+            offset_y: 0.0,
             line_spacing: 1.25,
             outline: 0.0,
             outline_color: [0, 0, 0, 255],
+            shadow: false,
+            shadow_color: [0, 0, 0, 255],
+            shadow_offset_x: 4.0,
+            shadow_offset_y: 4.0,
+            shadow_softness: 6.0,
         }
     }
 }

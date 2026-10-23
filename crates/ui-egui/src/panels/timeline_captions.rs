@@ -173,6 +173,8 @@ pub fn paint(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, area: Re
 pub fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, area: Rect, layout: &Layout) {
     let ctx = ui.ctx().clone();
     let rate = seq.settings.frame_rate;
+    // the razor cuts caption blocks too, like the clips beside them
+    let razor = app.ui.tool == crate::state::Tool::Razor;
     let drag = drag_state(&ctx);
     let mut actions: Vec<(String, Value)> = Vec::new();
     for (tr, row) in seq.caption_tracks.iter().zip(rows(area, seq.caption_tracks.len())) {
@@ -182,7 +184,7 @@ pub fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, area:
             if r.width() <= 0.0 {
                 continue;
             }
-            interact_block(app, ui, tr, c, r, rate, &mut actions);
+            interact_block(app, ui, tr, c, r, rate, layout, razor, &mut actions);
         }
     }
     run(app, ui, actions);
@@ -195,6 +197,8 @@ fn interact_block(
     c: &filmcraft_project::Caption,
     r: Rect,
     rate: filmcraft_time::FrameRate,
+    layout: &Layout,
+    razor: bool,
     actions: &mut Vec<(String, Value)>,
 ) {
     let ctx = ui.ctx().clone();
@@ -212,9 +216,13 @@ fn interact_block(
     if let Some(p) = resp.hover_pos()
         && !tr.locked
     {
-        ctx.set_cursor_icon(match gesture_at(p.x) {
-            Gesture::Move => CursorIcon::Default,
-            _ => CursorIcon::ResizeColumn,
+        ctx.set_cursor_icon(if razor {
+            CursorIcon::Crosshair
+        } else {
+            match gesture_at(p.x) {
+                Gesture::Move => CursorIcon::Default,
+                _ => CursorIcon::ResizeColumn,
+            }
         });
     }
     if resp.double_clicked() {
@@ -223,9 +231,25 @@ fn interact_block(
         actions.push(("captions.goTo".into(), json!({"caption": c.id.0})));
         return;
     }
+    if razor {
+        // a click (or the start of a drag) cuts the caption at the pointer, as the razor does clips
+        if (resp.clicked() || resp.drag_started())
+            && let Some(p) = resp.interact_pointer_pos().or_else(|| ctx.input(|i| i.pointer.press_origin()))
+        {
+            let t = rate.snap_nearest(layout.tick_at(p.x));
+            actions.push(("captions.split".into(), json!({"caption": c.id.0, "time": t.0})));
+        }
+        return;
+    }
     if resp.clicked() {
         let add = ctx.input(|i| i.modifiers.command || i.modifiers.shift);
-        actions.push(("captions.select".into(), json!({"captions": [c.id.0], "add": add})));
+        // a plain click selects the block and takes the playhead to it; Cmd/Shift only adds to the
+        // selection, so a multi-selection is not scattered by seeking (#caption-click)
+        if add {
+            actions.push(("captions.select".into(), json!({"captions": [c.id.0], "add": true})));
+        } else {
+            actions.push(("captions.goTo".into(), json!({"caption": c.id.0})));
+        }
     }
     if tr.locked {
         return;

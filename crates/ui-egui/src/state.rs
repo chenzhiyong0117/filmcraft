@@ -208,6 +208,10 @@ pub struct TimelineView {
     /// (`volume`, `pan`, `mute`, `send.<i>.level`, `fx.<slot>.<param>`).
     #[serde(default)]
     pub track_lanes: std::collections::BTreeMap<u64, String>,
+    /// Height the captions tab's style strip needed last frame. The strip wraps to fit a narrow
+    /// panel, so its height is measured after drawing and the segment list above gives it up.
+    #[serde(skip)]
+    pub caption_strip_h: f32,
 }
 
 impl TimelineView {
@@ -238,6 +242,7 @@ impl Default for TimelineView {
             seen_playhead: None,
             fit_empty: None,
             track_lanes: Default::default(),
+            caption_strip_h: 30.0,
         }
     }
 }
