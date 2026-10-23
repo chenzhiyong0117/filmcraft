@@ -188,10 +188,13 @@ fn track_json(s: &Session, t: &CaptionTrack, index: usize) -> Value {
         "locked": t.locked,
         "syncLock": t.sync_lock,
         "style": {
-            "font": t.style.font, "size": t.style.size, "color": hex(t.style.color),
+            "font": t.style.font, "style": t.style.style, "size": t.style.size, "color": hex(t.style.color),
             "background": t.style.background, "backgroundColor": hex(t.style.background_color),
             "align": format!("{:?}", t.style.align).to_lowercase(), "anchor": format!("{:?}", t.style.anchor).to_lowercase(),
-            "margin": t.style.margin, "lineSpacing": t.style.line_spacing, "outline": t.style.outline, "outlineColor": hex(t.style.outline_color),
+            "margin": t.style.margin, "offsetX": t.style.offset_x, "offsetY": t.style.offset_y,
+            "lineSpacing": t.style.line_spacing, "outline": t.style.outline, "outlineColor": hex(t.style.outline_color),
+            "shadow": t.style.shadow, "shadowColor": hex(t.style.shadow_color),
+            "shadowOffsetX": t.style.shadow_offset_x, "shadowOffsetY": t.style.shadow_offset_y, "shadowSoftness": t.style.shadow_softness,
         },
         "captions": t.captions.iter().map(|c| caption_json(s, c)).collect::<Vec<_>>(),
     })
@@ -296,7 +299,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "Caption Track Style",
             &[],
             None,
-            r##"{"track":id|"C1","font":str?,"size":f32?,"color":"#rrggbb[aa]"?,"background":bool?,"backgroundColor":"#rrggbbaa"?,"align":"left|center|right"?,"anchor":"top|middle|bottom"?,"margin":0..0.45 (fraction of frame height)?,"lineSpacing":f32?,"outline":f32?,"outlineColor":str?,"reset":bool?}"##,
+            r##"{"track":id|"C1","font":str?,"style":str?,"size":f32?,"color":"#rrggbb[aa]"?,"background":bool?,"backgroundColor":"#rrggbbaa"?,"align":"left|center|right"?,"anchor":"top|middle|bottom"?,"margin":0..0.45 (fraction of frame height)?,"offsetX":-1..1 (fraction of frame width)?,"offsetY":-1..1 (fraction of frame height)?,"lineSpacing":f32?,"outline":f32?,"outlineColor":str?,"shadow":bool?,"shadowColor":str?,"shadowOffsetX":f64?,"shadowOffsetY":f64?,"shadowSoftness":f64?,"reset":bool?,"merge":bool? (share one undo step with the previous style change, for a live drag)}"##,
             has_caption_track,
             |s, p| {
                 let tid = track_param(s, p).ok_or_else(|| {
@@ -308,8 +311,10 @@ pub fn commands() -> Vec<CommandSpec> {
                         ),
                     )
                 })?;
+                // a drag sends the style every frame and asks for one undo step (a live preview)
+                let merge = bool_p(p, "merge").unwrap_or(false);
                 let p = p.clone();
-                s.edit("Caption Style", |pr, st| {
+                let body = |pr: &mut filmcraft_project::Project, st: &mut crate::EditorState| -> Result<()> {
                     let seq = st.active_sequence.ok_or(EngineError::NoSequence)?;
                     let t = pr.sequence_mut(seq).and_then(|q| q.caption_track_mut(tid)).ok_or(EngineError::NoSequence)?;
                     let y = &mut t.style;
@@ -318,6 +323,10 @@ pub fn commands() -> Vec<CommandSpec> {
                     }
                     if let Some(v) = str_p(&p, "font") {
                         y.font = v.to_string();
+                    }
+                    if let Some(v) = str_p(&p, "style") {
+                        let v = v.trim();
+                        y.style = if v.is_empty() { CaptionStyle::default().style } else { v.to_string() };
                     }
                     if let Some(v) = f64_p(&p, "size") {
                         y.size = (v as f32).clamp(4.0, 400.0);
@@ -337,8 +346,29 @@ pub fn commands() -> Vec<CommandSpec> {
                     if let Some(v) = f64_p(&p, "outline") {
                         y.outline = (v as f32).clamp(0.0, 40.0);
                     }
+                    if let Some(b) = bool_p(&p, "shadow") {
+                        y.shadow = b;
+                    }
+                    if let Some(c) = p.get("shadowColor").and_then(parse_color) {
+                        y.shadow_color = c;
+                    }
+                    if let Some(v) = f64_p(&p, "shadowOffsetX") {
+                        y.shadow_offset_x = (v as f32).clamp(-200.0, 200.0);
+                    }
+                    if let Some(v) = f64_p(&p, "shadowOffsetY") {
+                        y.shadow_offset_y = (v as f32).clamp(-200.0, 200.0);
+                    }
+                    if let Some(v) = f64_p(&p, "shadowSoftness") {
+                        y.shadow_softness = (v as f32).clamp(0.0, 100.0);
+                    }
                     if let Some(v) = f64_p(&p, "margin") {
                         y.margin = (v as f32).clamp(0.0, 0.45);
+                    }
+                    if let Some(v) = f64_p(&p, "offsetX") {
+                        y.offset_x = (v as f32).clamp(-1.0, 1.0);
+                    }
+                    if let Some(v) = f64_p(&p, "offsetY") {
+                        y.offset_y = (v as f32).clamp(-1.0, 1.0);
                     }
                     if let Some(v) = f64_p(&p, "lineSpacing") {
                         y.line_spacing = (v as f32).clamp(0.8, 4.0);
@@ -358,7 +388,12 @@ pub fn commands() -> Vec<CommandSpec> {
                         None => {}
                     }
                     Ok(())
-                })?;
+                };
+                if merge {
+                    s.edit_merged("Caption Style", "caption-style", body)?;
+                } else {
+                    s.edit("Caption Style", body)?;
+                }
                 Ok(Value::Null)
             },
         ),

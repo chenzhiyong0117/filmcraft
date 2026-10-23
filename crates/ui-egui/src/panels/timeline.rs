@@ -755,6 +755,10 @@ fn empty_state(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let items: Vec<u64> = crate::panels::dragged_selection(app, item).iter().map(|i| i.0).collect();
         if let Err(e) = app.session.execute("file.newSequence", json!({"fromItems": items})) {
             app.ui.status = e.to_string();
+        } else {
+            // the sequence was built from this drop: clear the payload so the drop handler below
+            // does not place the same item a second time in the new sequence
+            crate::panels::clear_drag(ui);
         }
     }
     // OS files dropped on an empty Timeline: import already happened; create a sequence from the first item
