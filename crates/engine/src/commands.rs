@@ -3025,8 +3025,17 @@ fn build() -> Vec<CommandSpec> {
                 let clips = with_links(s, &[c]);
                 s.edit_sequence("Razor", |q, ctx, _| Ok(edit::razor_items(q, &clips, t, ctx)))?
             } else {
+                // captions are not tracks: Razor at the playhead cuts the segment under it too,
+                // so a caption splits like the clips beside it (one undo step)
+                let all = tr.is_none();
                 let tracks: Vec<TrackId> = tr.into_iter().collect();
-                s.edit_sequence("Razor", |q, ctx, _| Ok(edit::razor(q, &tracks, t, ctx)))?
+                s.edit_sequence("Razor", |q, ctx, _| {
+                    let cuts = edit::razor(q, &tracks, t, ctx);
+                    if all {
+                        edit::captions::split_captions_at(q, &[], t, ctx);
+                    }
+                    Ok(cuts)
+                })?
             };
             Ok(json!({"cuts": n.len()}))
         }),

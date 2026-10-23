@@ -168,9 +168,14 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 
     // ---- style strip
-    let style_h = 30.0;
+    // A narrow panel stacks the style controls instead of clipping them: one row when there is room
+    // for the whole strip, two or three otherwise (the segment list above gives the height up).
+    // The controls wrap to whatever width the panel has; last frame's measured height reserves the
+    // space for them, so resizing the panel never cuts a row off. The list keeps at least half.
+    let cap = (rect.height() * 0.55).max(30.0);
+    let style_h = app.ui.timeline.caption_strip_h.clamp(30.0, cap);
     let style_rect = Rect::from_min_max(pos2(rect.min.x + 10.0, rect.max.y - style_h), pos2(rect.max.x - 10.0, rect.max.y - 2.0));
-    style_strip(app, ui, style_rect, track_idx, &mut actions);
+    app.ui.timeline.caption_strip_h = style_strip(app, ui, style_rect, track_idx, &mut actions);
 
     // ---- segment list
     let list = Rect::from_min_max(pos2(rect.min.x + 6.0, bar.max.y + 8.0), pos2(rect.max.x - 6.0, style_rect.min.y - 6.0));
@@ -655,13 +660,65 @@ fn filmcraft_speech_available(app: &FilmcraftApp) -> bool {
     app.session.transcriber.is_some() || filmcraft_engine::transcript::speech_available()
 }
 
-fn style_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, track_idx: usize, actions: &mut Vec<(String, Value)>) {
-    let Some(tr) = app.session.active_sequence().and_then(|q| q.caption_tracks.get(track_idx)).cloned() else { return };
+/// Draw the caption style strip in `r` and return the height the wrapped controls needed.
+/// A caption-style number: a drag reports every frame (so the preview follows the pointer) and
+/// keeps its last value in ctx memory, because the widget re-seeds from the model each frame and the
+/// release frame's own value is the stale one. Typing commits as it changes. The `bool` says the
+/// value came from a drag and should share one undo step. `None` means nothing to send.
+fn style_number(
+    ui: &mut egui::Ui,
+    value: f32,
+    range: std::ops::RangeInclusive<f32>,
+    speed: f64,
+    prefix: &str,
+    suffix: &str,
+) -> (egui::Response, Option<(f32, bool)>) {
+    let mut v = value;
+    let resp = ui.add(crate::widgets::number_drag(&mut v).range(range).speed(speed).prefix(prefix).suffix(suffix));
+    let key = resp.id.with("drag-value");
+    // a drag ended by Escape keeps the value it had (#580)
+    if resp.drag_stopped() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ui.ctx().data_mut(|d| d.remove_temp::<f32>(key));
+        return (resp, None);
+    }
+    // a drag reports its value every frame so the preview follows the pointer; the engine merges
+    // those into one undo step, and the release commits the last value it saw
+    if resp.dragged() {
+        if v != value {
+            ui.ctx().data_mut(|d| d.insert_temp(key, v));
+        }
+        return (resp, Some((v, true)));
+    }
+    let changed = if resp.drag_stopped() {
+        let last: Option<f32> = ui.ctx().data_mut(|d| d.remove_temp(key));
+        last.map(|v| (v, true))
+    } else if resp.changed() {
+        Some((v, false))
+    } else {
+        None
+    };
+    (resp, changed)
+}
+
+/// Push a `captions.setStyle` for `track`, with `merge` when it is one frame of a drag.
+fn style_push(actions: &mut Vec<(String, Value)>, track: u64, params: Value, live: bool) {
+    let mut params = params;
+    if let Some(o) = params.as_object_mut() {
+        o.insert("track".into(), json!(track));
+        if live {
+            o.insert("merge".into(), json!(true));
+        }
+    }
+    actions.push(("captions.setStyle".into(), params));
+}
+
+fn style_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, track_idx: usize, actions: &mut Vec<(String, Value)>) -> f32 {
+    let Some(tr) = app.session.active_sequence().and_then(|q| q.caption_tracks.get(track_idx)).cloned() else { return 30.0 };
     let st = tr.style.clone();
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).id_salt("caption-style"));
-    child.horizontal_centered(|ui| {
+    child.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        let r = craft_ui::ComboBox::from_id_salt(("caption-font", tr.id.0)).selected_text(&st.font).width(130.0).height(400.0).show_ui(ui, |ui| {
+        let r = craft_ui::ComboBox::from_id_salt(("caption-font", tr.id.0)).selected_text(&st.font).width(96.0).height(400.0).show_ui(ui, |ui| {
             if !filmcraft_text::fonts::system_scanned() {
                 filmcraft_text::fonts::scan_system();
             }
@@ -679,13 +736,42 @@ fn style_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, track_idx: us
             }
         });
         app.auto.add("text.captions.style.font", r.response.rect, "Caption font");
-        let mut size = st.size;
-        let resp = ui.add(crate::widgets::number_drag(&mut size).range(8.0..=200.0).speed(0.5).suffix(" px"));
+        // font style/weight of the caption face: the family's own styles, then the universal ones
+        let styles: Vec<String> = filmcraft_text::families().into_iter().find(|(f, _)| f.eq_ignore_ascii_case(&st.font)).map(|(_, s)| s).unwrap_or_default();
+        let r = craft_ui::ComboBox::from_id_salt(("caption-style", tr.id.0)).selected_text(&st.style).width(92.0).height(320.0).show_ui(ui, |ui| {
+            let mut seen: Vec<&str> = Vec::new();
+            for name in styles.iter().map(String::as_str).chain(["Regular", "Medium", "SemiBold", "Bold", "Italic", "Bold Italic"]) {
+                if seen.contains(&name) {
+                    continue;
+                }
+                seen.push(name);
+                let resp = ui.selectable_label(name.eq_ignore_ascii_case(&st.style), name);
+                // An edge row may be only partly visible; automation must click its visible portion.
+                let visible = resp.rect.intersect(ui.clip_rect());
+                if visible.is_positive() {
+                    app.auto.add(&format!("text.captions.style.weight.option.{name}"), visible, name);
+                }
+                if resp.clicked() {
+                    actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "style": name})));
+                }
+            }
+        });
+        app.auto.add("text.captions.style.weight", r.response.rect, tl!("Font Style"));
+        let (resp, size) = style_number(ui, st.size, 8.0..=200.0, 0.5, "", " px");
         app.auto.add("text.captions.style.size", resp.rect, "Caption size");
-        // a drag ended by Escape keeps the size it had (#580)
-        let escaped = resp.drag_stopped() && ui.input(|i| i.key_pressed(egui::Key::Escape));
-        if !escaped && (resp.drag_stopped() || (resp.changed() && !resp.dragged())) {
-            actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "size": size})));
+        if let Some((size, live)) = size {
+            style_push(actions, tr.id.0, json!({"size": size}), live);
+        }
+        // position by numbers: a nudge from the aligned spot, in percent of the frame
+        let (resp, off_x) = style_number(ui, st.offset_x * 100.0, -100.0..=100.0, 0.5, "X ", "%");
+        app.auto.add("text.captions.style.offsetX", resp.rect, "Caption X offset");
+        if let Some((off_x, live)) = off_x {
+            style_push(actions, tr.id.0, json!({"offsetX": off_x / 100.0}), live);
+        }
+        let (resp, off_y) = style_number(ui, st.offset_y * 100.0, -100.0..=100.0, 0.5, "Y ", "%");
+        app.auto.add("text.captions.style.offsetY", resp.rect, "Caption Y offset");
+        if let Some((off_y, live)) = off_y {
+            style_push(actions, tr.id.0, json!({"offsetY": off_y / 100.0}), live);
         }
         let mut col = Color32::from_rgba_unmultiplied(st.color[0], st.color[1], st.color[2], st.color[3]);
         let resp = egui::color_picker::color_edit_button_srgba(ui, &mut col, egui::color_picker::Alpha::Opaque);
@@ -724,7 +810,68 @@ fn style_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, track_idx: us
                 actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "anchor": name})));
             }
         }
+        // outline and shadow live in a popup, so the strip above stays one or two rows long
+        let label = format!("{} / {}", tl!("Stroke"), tl!("Shadow"));
+        let popup = ui.menu_button(egui::RichText::new(label).size(12.0), |ui| {
+            ui.set_min_width(260.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(tl!("Stroke")).size(11.0));
+                let (r, ow) = style_number(ui, st.outline, 0.0..=40.0, 0.2, "", " px");
+                app.auto.add("text.captions.style.stroke", r.rect, "Stroke width");
+                if let Some((ow, live)) = ow {
+                    style_push(actions, tr.id.0, json!({"outline": ow}), live);
+                }
+                let mut oc = Color32::from_rgba_unmultiplied(st.outline_color[0], st.outline_color[1], st.outline_color[2], st.outline_color[3]);
+                let r = egui::color_picker::color_edit_button_srgba(ui, &mut oc, egui::color_picker::Alpha::Opaque);
+                app.auto.add("text.captions.style.strokeColor", r.rect, "Stroke colour");
+                if r.changed() {
+                    actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "outlineColor": oc.to_srgba_unmultiplied()})));
+                }
+            });
+            let mut on = st.shadow;
+            let r = ui.checkbox(&mut on, tl!("Shadow"));
+            app.auto.add("text.captions.style.shadow", r.rect, "Shadow");
+            if r.changed() {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "shadow": on})));
+            }
+            ui.add_enabled_ui(on, |ui| {
+                // a distance and an angle read better than raw x/y, so the popup shows those
+                let dist0 = st.shadow_offset_x.hypot(st.shadow_offset_y);
+                let angle0 = st.shadow_offset_y.atan2(st.shadow_offset_x).to_degrees();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tl!("Distance")).size(11.0));
+                    let (r, moved) = style_number(ui, dist0, 0.0..=200.0, 0.5, "", " px");
+                    app.auto.add("text.captions.style.shadowDistance", r.rect, "Shadow distance");
+                    ui.label(egui::RichText::new(tl!("Angle")).size(11.0));
+                    let (r, turned) = style_number(ui, angle0, -180.0..=180.0, 0.5, "", "\u{00b0}");
+                    app.auto.add("text.captions.style.shadowAngle", r.rect, "Shadow angle");
+                    if let Some((dist, angle, live)) =
+                        moved.map(|(d, l)| (d, turned.map(|(a, _)| a).unwrap_or(angle0), l)).or(turned.map(|(a, l)| (dist0, a, l)))
+                    {
+                        let (x, y) = (dist * angle.to_radians().cos(), dist * angle.to_radians().sin());
+                        style_push(actions, tr.id.0, json!({"shadowOffsetX": x, "shadowOffsetY": y}), live);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tl!("Softness")).size(11.0));
+                    let (r, soft) = style_number(ui, st.shadow_softness, 0.0..=100.0, 0.5, "", " px");
+                    app.auto.add("text.captions.style.shadowSoftness", r.rect, "Shadow softness");
+                    if let Some((soft, live)) = soft {
+                        style_push(actions, tr.id.0, json!({"shadowSoftness": soft}), live);
+                    }
+                    let mut sc = Color32::from_rgba_unmultiplied(st.shadow_color[0], st.shadow_color[1], st.shadow_color[2], st.shadow_color[3]);
+                    let r = egui::color_picker::color_edit_button_srgba(ui, &mut sc, egui::color_picker::Alpha::Opaque);
+                    app.auto.add("text.captions.style.shadowColor", r.rect, "Shadow colour");
+                    if r.changed() {
+                        actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "shadowColor": sc.to_srgba_unmultiplied()})));
+                    }
+                });
+            });
+        });
+        app.auto.add("text.captions.style.effects", popup.response.rect, "Stroke and shadow");
     });
+    // the wrapped rows, plus a little air above the segment list
+    child.min_rect().height().max(24.0) + 6.0
 }
 
 fn run(app: &mut FilmcraftApp, ui: &egui::Ui, actions: Vec<(String, Value)>) {
