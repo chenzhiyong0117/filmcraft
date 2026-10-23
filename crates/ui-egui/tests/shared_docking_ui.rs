@@ -21,6 +21,7 @@ fn layout() -> Layout {
             b: Box::new(DockNode::Tabs { panels: vec![PanelKind::Source, PanelKind::Program], active: 1 }),
         },
         floating: vec![],
+        panel_windows: vec![],
     }
 }
 
@@ -548,6 +549,7 @@ fn narration_selection_reveals_covered_floating_tts_once_without_editing_the_pro
         name: "Reveal cancellation".into(),
         layout: serde_json::to_value(&h.state().ui.dock).unwrap(),
         floating: serde_json::to_value(&h.state().ui.floating).unwrap(),
+        panel_windows: serde_json::Value::Null,
     };
     h.state_mut().workspaces.saved.push(saved);
     h.state_mut().show_panel(PanelKind::TextToSpeech);

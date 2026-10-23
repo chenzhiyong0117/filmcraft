@@ -866,6 +866,7 @@ impl FilmcraftApp {
         let layout = dock::saved_docking(&self.workspaces, name);
         self.ui.dock = layout.root;
         self.ui.floating = layout.floating;
+        self.ui.panel_windows = layout.panel_windows;
         self.pending_panel_raise = None;
         self.ui.keys.maximized = None;
         if self.workspaces.current != name {

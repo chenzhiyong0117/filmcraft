@@ -1,10 +1,13 @@
 //! FilmCraft's panel chrome and document tabs over the shared docking transactions.
+//!
+//! A floating group can also move out of the main window into its own native window
+//! ([`FilmcraftApp::set_panel_window`]), which can sit on another monitor.
 
 use craft_ui::docking::{Action, DropTarget, Placement, Zone, resolve_drop};
 use egui::{Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
 
-use crate::dock::{self, DockAction, DockNode, Group, PanelKind};
+use crate::dock::{self, DockAction, DockNode, Group, PanelKind, PanelWindow};
 use crate::{FilmcraftApp, panels};
 
 /// Single source for rendering and hit testing: saved offscreen positions remain
@@ -21,6 +24,17 @@ fn drag_id() -> egui::Id {
     egui::Id::new("dock-panel-drag")
 }
 
+/// The viewport a panel's own native window draws in.
+fn panel_window_id(panel: PanelKind) -> egui::ViewportId {
+    egui::ViewportId::from_hash_of(("panel-window", panel.id()))
+}
+
+/// Where a panel's native window opens first: kept for the session, so the window system owns
+/// its place after that instead of being dragged back every frame.
+fn panel_window_spawn_id(panel: PanelKind) -> egui::Id {
+    egui::Id::new(("panel-window-spawn", panel.id()))
+}
+
 pub(crate) fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
     if id == "window.dockAction" {
         return Some((|| {
@@ -28,6 +42,20 @@ pub(crate) fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, param
             let action = serde_json::from_value(value).map_err(|error| format!("invalid docking action: {error}"))?;
             app.apply_dock(action)?;
             Ok(Value::Null)
+        })());
+    }
+    if id == "window.panelWindow" {
+        return Some((|| {
+            let panel = match params.get("panel") {
+                None => app.ui.focused,
+                Some(value) => value.as_str().and_then(PanelKind::from_name).ok_or("unknown panel")?,
+            };
+            let window = match params.get("window") {
+                None => None,
+                Some(value) => Some(value.as_bool().ok_or("window must be a boolean")?),
+            };
+            let open = app.set_panel_window(ctx, panel, window)?;
+            Ok(json!({"panel": panel.id(), "window": open}))
         })());
     }
     if !matches!(id, "window.dockPanel" | "window.floatPanel" | "window.closePanel") {
@@ -127,6 +155,78 @@ impl FilmcraftApp {
     pub fn dock_to_edge(&mut self, panel: PanelKind, zone: Zone) -> Result<(), String> {
         self.commit_dock(|shared| crate::dock_shared::dock_at_edge(shared, panel, zone))?;
         self.ui.keys.maximized = None;
+        Ok(())
+    }
+
+    /// The native window a floating group (its `panels`) shows in, if any.
+    fn panel_window_of(&self, panels: &[PanelKind]) -> Option<PanelWindow> {
+        self.ui.panel_windows.iter().find(|w| panels.contains(&w.panel)).copied()
+    }
+
+    /// Whether panel `p` shows in its own native window.
+    pub fn in_panel_window(&self, p: PanelKind) -> bool {
+        self.ui.floating.iter().any(|group| group.panels.contains(&p) && self.panel_window_of(&group.panels).is_some())
+    }
+
+    /// Move panel `p` (and the floating group it is in) into its own native window, which the
+    /// user can place on another monitor, or back into the main window (`window` false; it floats
+    /// there where it was). `None` toggles. A docked panel is undocked first. The window opens
+    /// over the place the panel had in the main window. Returns whether `p` is now in a window.
+    pub fn set_panel_window(&mut self, ctx: &egui::Context, p: PanelKind, window: Option<bool>) -> Result<bool, String> {
+        let group_of = |app: &Self| app.ui.floating.iter().find(|group| group.panels.contains(&p)).map(|group| (group.panels.clone(), group.rect));
+        let current = self.in_panel_window(p);
+        let window = window.unwrap_or(!current);
+        if window == current {
+            return Ok(current);
+        }
+        if !window {
+            if let Some((panels, _)) = group_of(self) {
+                self.ui.panel_windows.retain(|w| !panels.contains(&w.panel));
+            }
+            return Ok(false);
+        }
+        if group_of(self).is_none() {
+            if !self.ui.dock.contains(p) {
+                return Err(format!("{} is not open", p.title()));
+            }
+            let rect = default_float_rect(ctx.input_for(egui::ViewportId::ROOT, |i| i.content_rect()));
+            self.apply_dock(Action::Float { panel: p, rect })?;
+        }
+        let Some((_, [x, y, w, h])) = group_of(self) else { return Err(format!("can't undock {}", p.title())) };
+        // Over the panel's place in the main window (its content's position on the desktop).
+        let origin = ctx.input_for(egui::ViewportId::ROOT, |i| i.viewport().inner_rect.map(|r| r.min)).unwrap_or(pos2(0.0, 0.0));
+        let rect = PanelWindow::sanitized([origin.x + x, origin.y + y, w, h]);
+        ctx.data_mut(|d| d.remove::<[f32; 4]>(panel_window_spawn_id(p)));
+        self.ui.panel_windows.push(PanelWindow { panel: p, rect });
+        if self.ui.keys.maximized == Some(p) {
+            self.ui.keys.maximized = None;
+        }
+        Ok(true)
+    }
+
+    /// A drag that ends off the main window leaves the panel on the desktop as its own native
+    /// window, at `global` (desktop points), sized by the caller: dropping a floating panel on
+    /// the other display must not snap it back into the window. The panel floats first when it
+    /// is still docked.
+    pub(crate) fn detach_panel(&mut self, ctx: &egui::Context, panel: PanelKind, global: [f32; 4]) -> Result<(), String> {
+        if !self.ui.floating.iter().any(|group| group.panels.contains(&panel)) {
+            if !self.ui.dock.contains(panel) {
+                return Err(format!("{} is not open", panel.title()));
+            }
+            let origin = ctx.input_for(egui::ViewportId::ROOT, |i| i.viewport().inner_rect.map(|r| r.min)).unwrap_or(pos2(0.0, 0.0));
+            let rect = [global[0] - origin.x, global[1] - origin.y, global[2], global[3]];
+            if !rect.iter().all(|v| v.is_finite()) {
+                return Err("the drop position is not finite".into());
+            }
+            self.apply_dock(Action::Float { panel, rect })?;
+        }
+        let rect = PanelWindow::sanitized(global);
+        ctx.data_mut(|data| data.remove::<[f32; 4]>(panel_window_spawn_id(panel)));
+        self.ui.panel_windows.retain(|window| window.panel != panel);
+        self.ui.panel_windows.push(PanelWindow { panel, rect });
+        if self.ui.keys.maximized == Some(panel) {
+            self.ui.keys.maximized = None;
+        }
         Ok(())
     }
 
@@ -240,8 +340,17 @@ impl FilmcraftApp {
         for group in &groups {
             dock::paint_group_focus(ui, group, self.ui.focused, &t);
         }
+        // A native window is kept only for a panel that still floats.
+        let ui_state = &mut self.ui;
+        ui_state.panel_windows.retain(|w| ui_state.floating.iter().any(|group| group.panels.contains(&w.panel)));
         let floating_order = self.floating_order(&ctx);
         for index in floating_order.into_iter().filter(|_| maximized.is_none()) {
+            // Groups in their own native window take no tab drops from the main window.
+            let window = self.ui.floating.get(index).and_then(|group| self.panel_window_of(&group.panels));
+            if let Some(window) = window {
+                actions.extend(self.panel_window(&ctx, index, window, &seqs));
+                continue;
+            }
             if let Some(target) = self.floating_group(&ctx, index, &seqs, &mut actions) {
                 targets.push(target);
             }
@@ -293,6 +402,78 @@ impl FilmcraftApp {
         self.cancel_value_drag(ui.ctx());
     }
 
+    /// One floating group in its own native window: the group's tab strip and active panel fill
+    /// the window. Closing the window brings the group back into the main window.
+    fn panel_window(&mut self, ctx: &egui::Context, i: usize, window: PanelWindow, seqs: &dock::SeqTabs) -> Vec<DockAction> {
+        let t = self.tokens;
+        let Some(f) = self.ui.floating.get(i).cloned() else { return vec![] };
+        let active = f.active.min(f.panels.len().saturating_sub(1));
+        let Some(shown) = f.panels.get(active).copied() else { return vec![] };
+        // The window opens at its saved place; after that the window system owns its position and
+        // size (handing them back every frame would fight the user dragging it).
+        let spawn_id = panel_window_spawn_id(window.panel);
+        let spawn = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(spawn_id, || PanelWindow::sanitized(window.rect)));
+        let builder = egui::ViewportBuilder::default()
+            .with_title(shown.title())
+            .with_position([spawn[0], spawn[1]])
+            .with_inner_size([spawn[2], spawn[3]])
+            .with_min_inner_size(dock::PANEL_WINDOW_MIN);
+        let mut closed = false;
+        let mut placed = None;
+        let mut actions = Vec::new();
+        ctx.show_viewport_immediate(panel_window_id(window.panel), builder, |ctx, class| {
+            let native = matches!(class, egui::ViewportClass::Immediate | egui::ViewportClass::Deferred);
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.panel_bg)).show(ctx, |ui| {
+                let r = ui.max_rect();
+                let group = Group {
+                    path: format!("w{i}"),
+                    rect: r,
+                    content: Rect::from_min_max(pos2(r.min.x, (r.min.y + t.tab_h).min(r.max.y)), r.max),
+                    panels: f.panels.clone(),
+                    active,
+                };
+                let chrome = dock::draw_group_chrome_details(ui, &group, seqs, &t, &mut self.auto);
+                // Tabs can't be dragged between native windows yet.
+                actions.extend(chrome.actions.into_iter().filter(|a| !matches!(a, DockAction::BeginDrag(_))));
+                if let Some(panel) = group.panels.get(group.active).copied() {
+                    self.panel_body(ui, panel, group.content);
+                }
+                dock::paint_group_focus(ui, &group, self.ui.focused, &t);
+                if native {
+                    panels::panel_menu_popup(self, ui);
+                }
+            });
+            // An embedded window (no native windows on this platform) reads the main window's
+            // input: its close request and place aren't this window's.
+            // Only this window's own viewport answers for it: on some frames the immediate
+            // viewport reports the main window's input instead, and writing that rect back would
+            // stretch the panel window to the size of the main window.
+            let own = ctx.viewport_id() == panel_window_id(window.panel);
+            if native && own {
+                closed = ctx.input(|i| i.viewport().close_requested());
+                placed = ctx.input(|i| {
+                    let v = i.viewport();
+                    let inner = v.inner_rect?;
+                    let min = v.outer_rect.map_or(pos2(window.rect[0], window.rect[1]), |outer| outer.min);
+                    Some([min.x, min.y, inner.width(), inner.height()])
+                });
+            }
+        });
+        if closed {
+            self.ui.panel_windows.retain(|w| !f.panels.contains(&w.panel));
+            ctx.data_mut(|d| d.remove::<[f32; 4]>(spawn_id));
+            return actions;
+        }
+        // Remember where the window is, so the workspace reopens it there.
+        if let Some(rect) = placed.map(PanelWindow::sanitized)
+            && rect != window.rect
+            && let Some(w) = self.ui.panel_windows.iter_mut().find(|w| w.panel == window.panel)
+        {
+            w.rect = rect;
+        }
+        actions
+    }
+
     fn floating_group(&mut self, ctx: &egui::Context, index: usize, seqs: &dock::SeqTabs, actions: &mut Vec<DockAction>) -> Option<DropTarget<PanelKind>> {
         let floating = self.ui.floating.get(index)?.clone();
         let panel = *floating.panels.first()?;
@@ -300,6 +481,7 @@ impl FilmcraftApp {
         let t = self.tokens;
         let id = egui::Id::new(("floating-panel", panel.id()));
         let mut output = None;
+        let mut detach: Option<(egui::Pos2, egui::Vec2)> = None;
         egui::Area::new(id).order(egui::Order::Middle).fixed_pos(rect.min).constrain(false).interactable(true).show(ctx, |ui| {
             let (rect, _) = ui.allocate_exact_size(rect.size(), Sense::hover());
             let compact = floating.panels.len() == 1 && panel.compact();
@@ -308,6 +490,13 @@ impl FilmcraftApp {
             let response = ui.interact(strip, id.with("move"), Sense::drag());
             self.auto.add_response(&format!("panel.float.{index}.move"), &response, "Move floating panel");
             let mut next = if response.dragged() { rect.translate(response.drag_delta()) } else { rect };
+            // releasing the header off the main window leaves the panel on the desktop
+            if response.drag_stopped()
+                && let Some(at) = ctx.pointer_latest_pos().or_else(|| response.interact_pointer_pos())
+                && !ctx.content_rect().expand(6.0).contains(at)
+            {
+                detach = Some((at, rect.size()));
+            }
             let group = Group {
                 path: format!("f{index}"),
                 rect,
@@ -340,12 +529,20 @@ impl FilmcraftApp {
             if delta != egui::Vec2::ZERO {
                 next = Rect::from_min_size(next.min, (next.size() + delta).max(vec2(160.0, 100.0)));
             }
-            if next != rect {
+            if next != rect && detach.is_none() {
                 let _ = self.dock_command(ctx, Action::MoveFloating { panel, rect: [next.min.x, next.min.y, next.width(), next.height()] });
             }
             dock::paint_group_focus(ui, &group, self.ui.focused, &t);
             output = target(&group, chrome.tabs, false);
         });
+        if let Some((at, size)) = detach {
+            let origin = ctx.input_for(egui::ViewportId::ROOT, |i| i.viewport().inner_rect.map(|r| r.min)).unwrap_or(pos2(0.0, 0.0));
+            let size = vec2(size.x.max(dock::PANEL_WINDOW_MIN[0]), size.y.max(dock::PANEL_WINDOW_MIN[1]));
+            if self.detach_panel(ctx, panel, [origin.x + at.x - 40.0, origin.y + at.y - 10.0, size.x, size.y]).is_ok() {
+                self.ui.focused = panel;
+            }
+            return None;
+        }
         output
     }
 
@@ -382,6 +579,14 @@ impl FilmcraftApp {
         ctx.request_repaint();
         if ctx.input(|input| input.pointer.primary_released()) {
             ctx.data_mut(|data| data.remove::<PanelKind>(drag_id()));
+            // dropped off the main window: the panel lands on the desktop (another display)
+            if !ctx.content_rect().contains(pos) {
+                let origin = ctx.input_for(egui::ViewportId::ROOT, |i| i.viewport().inner_rect.map(|r| r.min)).unwrap_or(pos2(0.0, 0.0));
+                if self.detach_panel(ctx, panel, [origin.x + pos.x - 40.0, origin.y + pos.y - 12.0, 420.0, 320.0]).is_ok() {
+                    self.ui.focused = panel;
+                }
+                return;
+            }
             if let Some((_, zone, _)) = edge {
                 if crate::menus::invoke(self, ctx, "window.dockPanel", json!({"panel": panel.id(), "zone": zone})).is_ok() {
                     self.ui.focused = panel;

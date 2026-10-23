@@ -69,6 +69,7 @@ pub(crate) fn decode(layout: SharedLayout<PanelKind>) -> Result<Layout, String> 
             None => DockNode::Tabs { panels: vec![], active: 0 },
         },
         floating: layout.floating.into_iter().map(|group| Floating { panels: group.panels, active: group.active, rect: group.rect }).collect(),
+        panel_windows: vec![],
     })
 }
 

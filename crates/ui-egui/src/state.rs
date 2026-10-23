@@ -436,6 +436,10 @@ pub struct UiState {
     pub dock: DockNode,
     #[serde(default)]
     pub floating: Vec<crate::dock::Floating>,
+    /// Floating groups shown in their own native window, which the user can move to another
+    /// monitor.
+    #[serde(default)]
+    pub panel_windows: Vec<crate::dock::PanelWindow>,
     /// Where each panel closed while floating was ([x, y, width, height]): opening it again
     /// brings it back there, floating, instead of docked (#1985).
     #[serde(default)]
@@ -964,6 +968,7 @@ impl Default for UiState {
             mode: Mode::Edit,
             workspace: "Editing".into(),
             floating: vec![],
+            panel_windows: vec![],
             closed_floating: vec![],
             dock: crate::dock::workspace("Editing"),
             focused: PanelKind::Timeline,

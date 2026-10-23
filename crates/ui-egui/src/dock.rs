@@ -201,6 +201,10 @@ pub struct SavedWorkspace {
     /// Kept raw for the same per-workspace failure isolation as the dock tree.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub floating: serde_json::Value,
+    /// Floating groups shown in their own native windows ([`PanelWindow`]), kept raw like
+    /// `floating`.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub panel_windows: serde_json::Value,
 }
 
 impl WorkspacePrefs {
@@ -264,13 +268,14 @@ pub fn saved_docking(prefs: &WorkspacePrefs, name: &str) -> Layout {
         let mut layout = Layout {
             root: serde_json::from_value(saved.layout.clone()).ok()?,
             floating: if saved.floating.is_null() { vec![] } else { serde_json::from_value(saved.floating.clone()).ok()? },
+            panel_windows: if saved.panel_windows.is_null() { vec![] } else { serde_json::from_value(saved.panel_windows.clone()).ok()? },
         };
         if layout.floating.is_empty() {
             migrate_legacy_effects(&mut layout.root);
         }
         layout.validate().ok().map(|()| layout)
     });
-    saved.unwrap_or_else(|| Layout { root: workspace(name), floating: vec![] })
+    saved.unwrap_or_else(|| Layout { root: workspace(name), floating: vec![], panel_windows: vec![] })
 }
 
 /// Older Effects workspaces stored the same Effect Controls panel twice: selected beside
@@ -458,12 +463,46 @@ pub struct Floating {
     pub rect: [f32; 4],
 }
 
+/// A floating group moved out of the main window into its own native window (which can sit on
+/// another monitor): the group holding `panel` shows there.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PanelWindow {
+    pub panel: PanelKind,
+    /// The window's [x, y] outer position and [w, h] inner size, in desktop points.
+    pub rect: [f32; 4],
+}
+
+/// The smallest native panel window, in points.
+pub const PANEL_WINDOW_MIN: [f32; 2] = [160.0, 100.0];
+pub const PANEL_WINDOW_MAX: f32 = 16_384.0;
+/// The farthest a native panel window may sit from the desktop origin, in points.
+pub const PANEL_WINDOW_MAX_POS: f32 = 100_000.0;
+
+impl PanelWindow {
+    /// The rect made safe to hand to the windowing system: finite, with a size within
+    /// [`PANEL_WINDOW_MIN`]..=[`PANEL_WINDOW_MAX`] and a position within ±[`PANEL_WINDOW_MAX_POS`]
+    /// (hostile workspace files and bad monitor reports included).
+    pub fn sanitized(rect: [f32; 4]) -> [f32; 4] {
+        let finite = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
+        let [x, y, w, h] = rect;
+        [
+            finite(x, 0.0).clamp(-PANEL_WINDOW_MAX_POS, PANEL_WINDOW_MAX_POS),
+            finite(y, 0.0).clamp(-PANEL_WINDOW_MAX_POS, PANEL_WINDOW_MAX_POS),
+            finite(w, 420.0).clamp(PANEL_WINDOW_MIN[0], PANEL_WINDOW_MAX),
+            finite(h, 320.0).clamp(PANEL_WINDOW_MIN[1], PANEL_WINDOW_MAX),
+        ]
+    }
+}
+
 /// App persistence shape; all mutations pass through the shared docking model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     pub root: DockNode,
     #[serde(default)]
     pub floating: Vec<Floating>,
+    /// Floating groups that show in their own native window, one entry per window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub panel_windows: Vec<PanelWindow>,
 }
 
 impl Layout {
@@ -471,7 +510,18 @@ impl Layout {
         crate::dock_shared::apply(self, action)
     }
     pub fn validate(&self) -> Result<(), String> {
-        crate::dock_shared::encode(&self.root, &self.floating)?.validate().map_err(|error| error.to_string())
+        crate::dock_shared::encode(&self.root, &self.floating)?.validate().map_err(|error| error.to_string())?;
+        // A native window shows a group that still floats; one whose group is gone would open
+        // over nothing.
+        for window in &self.panel_windows {
+            if !self.floating.iter().any(|group| group.panels.contains(&window.panel)) {
+                return Err(format!("panel window for {} has no floating group", window.panel.title()));
+            }
+            if !window.rect.iter().all(|v| v.is_finite()) {
+                return Err("panel window rect must be finite".into());
+            }
+        }
+        Ok(())
     }
     pub fn contains(&self, panel: PanelKind) -> bool {
         self.root.contains(panel) || self.floating.iter().any(|group| group.panels.contains(&panel))
@@ -961,5 +1011,76 @@ mod tests {
         d.open_near(PanelKind::Info, PanelKind::Source);
         assert!(d.is_visible(PanelKind::Info));
         assert_eq!(d, hsplit(SplitSize::Ratio(0.5), tabs(&[PanelKind::Effects, PanelKind::Info], 1), tabs(&[PanelKind::Markers], 0)));
+    }
+
+    /// A native panel window and the floating group it shows are one unit: the window is only
+    /// valid while that group floats, and must survive a save/load round trip.
+    #[test]
+    fn panel_windows_roundtrip_with_their_floating_group() {
+        let mut layout = Layout { root: workspace("Editing"), floating: vec![], panel_windows: vec![] };
+        let floating = Floating { panels: vec![PanelKind::Timecode], active: 0, rect: [590.0, 330.0, 420.0, 320.0] };
+        layout.floating.push(floating.clone());
+        layout.panel_windows.push(PanelWindow { panel: PanelKind::Timecode, rect: [1920.0, 96.0, 420.0, 320.0] });
+        layout.validate().unwrap();
+        let json = serde_json::to_string(&layout).unwrap();
+        let back: Layout = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.panel_windows, layout.panel_windows);
+        assert_eq!(back.floating, vec![floating]);
+        // the layout is written without windows too (older files, files that never used one)
+        let mut plain = Layout { root: workspace("Editing"), floating: vec![], panel_windows: vec![] };
+        plain.floating.push(Floating { panels: vec![PanelKind::Timecode], active: 0, rect: [0.0, 0.0, 420.0, 320.0] });
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("panel_windows"), "an empty window list is left out: {json}");
+        plain.panel_windows.push(PanelWindow { panel: PanelKind::Project, rect: [0.0, 0.0, 420.0, 320.0] });
+        assert!(plain.validate().is_err(), "a window needs a floating group");
+    }
+
+    /// Rectangles come from workspace files and monitor reports: both are hostile input.
+    #[test]
+    fn panel_window_rects_are_sanitized() {
+        for rect in [[f32::NAN, 0.0, 420.0, 320.0], [0.0, f32::INFINITY, 420.0, 320.0], [1e9, -1e9, -5.0, 1e12]] {
+            let fixed = PanelWindow::sanitized(rect);
+            assert!(fixed.iter().all(|v| v.is_finite()), "{rect:?} -> {fixed:?}");
+            assert!((PANEL_WINDOW_MIN[0]..=PANEL_WINDOW_MAX).contains(&fixed[2]), "{rect:?} -> {fixed:?}");
+            assert!((PANEL_WINDOW_MIN[1]..=PANEL_WINDOW_MAX).contains(&fixed[3]), "{rect:?} -> {fixed:?}");
+        }
+        assert_eq!(PanelWindow::sanitized([0.0, 0.0, 420.0, 320.0]), [0.0, 0.0, 420.0, 320.0]);
+    }
+
+    /// The command behind the panel menu and the Window menu: undock into a native window, then
+    /// bring the panel back into the main window. No frame is drawn, no windowing system involved.
+    #[test]
+    fn a_panel_moves_to_its_own_window_and_back() {
+        let ctx = egui::Context::default();
+        let mut app = crate::FilmcraftApp::new(filmcraft_engine::Session::default());
+        app.show_panel(PanelKind::Program);
+        assert!(!app.in_panel_window(PanelKind::Program));
+        let toggled = app.set_panel_window(&ctx, PanelKind::Program, None).unwrap();
+        assert!(toggled);
+        assert_eq!(app.ui.panel_windows.len(), 1);
+        let w = app.ui.panel_windows[0];
+        assert_eq!(w.panel, PanelKind::Program);
+        assert!(w.rect.iter().all(|v| v.is_finite()));
+        assert!(app.ui.floating.iter().any(|group| group.panels.contains(&PanelKind::Program)), "the group still floats: the window shows it");
+        // a second group's window doesn't disturb this one
+        let back = app.set_panel_window(&ctx, PanelKind::Program, Some(false)).unwrap();
+        assert!(!back);
+        assert!(app.ui.panel_windows.is_empty());
+        assert!(app.ui.floating.iter().any(|group| group.panels.contains(&PanelKind::Program)), "it floats in the main window again");
+    }
+
+    /// A drop off the main window: the panel leaves the window as a native one where it was
+    /// dropped, even when it was still docked, and dropping again moves that window.
+    #[test]
+    fn a_drop_off_the_window_opens_a_native_window_there() {
+        let ctx = egui::Context::default();
+        let mut app = crate::FilmcraftApp::new(filmcraft_engine::Session::default());
+        assert!(app.ui.dock.contains(PanelKind::Program));
+        app.detach_panel(&ctx, PanelKind::Program, [1870.0, 558.0, 420.0, 320.0]).unwrap();
+        assert_eq!(app.ui.panel_windows, vec![PanelWindow { panel: PanelKind::Program, rect: [1870.0, 558.0, 420.0, 320.0] }]);
+        assert!(app.ui.floating.iter().any(|group| group.panels.contains(&PanelKind::Program)), "the group floats, the window shows it");
+        app.detach_panel(&ctx, PanelKind::Program, [1900.0, 100.0, 420.0, 320.0]).unwrap();
+        assert_eq!(app.ui.panel_windows.len(), 1, "one window per group, not a stack");
+        assert_eq!(app.ui.panel_windows[0].rect, [1900.0, 100.0, 420.0, 320.0]);
     }
 }
