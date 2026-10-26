@@ -18,7 +18,8 @@
 //!   time) and `kind`, the trim a press of the current tool with `modifiers` starts there
 //! - `ui.timeline.locate {clip, edge?}`: screen point of a clip body/edge (for drags)
 //! - `ui.playback {action: play|stop|toggle, speed?}`
-//! - `ui.screenshot {path?, panel?}`: PNG of the window (or one panel)
+//! - `ui.screenshot {path?, panel?, format?, quick?}`: PNG (or `format:"raw"` RGBA) of the window
+//!   (or one panel); `quick` skips the settle delay for a recorder
 //! - `ui.resize {width, height}` / `ui.focus` / `app.quit`
 
 use std::sync::mpsc::Sender;
@@ -75,6 +76,12 @@ pub enum Outcome {
         path: Option<String>,
         /// Resolved to fresh geometry at issue time, not here.
         crop: Option<crate::capture::CropTarget>,
+        /// Write the pixels as raw RGBA rows instead of PNG: a recording tool reads frames at
+        /// speed, and PNG encoding is the slow part.
+        raw: bool,
+        /// Skip the settle delay: the caller is capturing continuously and wants every frame it
+        /// can get, not a guaranteed-settled one.
+        quick: bool,
     },
 }
 
@@ -561,7 +568,11 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
             };
             // Bring the window on screen so a frame is presented, without taking keyboard focus.
             app.raise_for_control(ctx);
-            Outcome::Screenshot { path: s("path").map(str::to_string), crop }
+            // A recording loop reads frames at speed, so it can ask for raw pixels and skip the
+            // settle delay that a one-shot screenshot uses.
+            let raw = s("format").is_some_and(|f| f.eq_ignore_ascii_case("raw") || f.eq_ignore_ascii_case("rgba"));
+            let quick = p.get("quick").and_then(Value::as_bool).unwrap_or(false);
+            Outcome::Screenshot { path: s("path").map(str::to_string), crop, raw, quick }
         }
         "ui.resize" => {
             let w = p.get("width").and_then(Value::as_f64).unwrap_or(1600.0) as f32;
@@ -653,8 +664,8 @@ pub fn inspect(app: &FilmcraftApp, ctx: &egui::Context) -> Value {
 }
 
 /// Save a screenshot (optionally cropped to a rect in points) as PNG; returns the reply JSON.
-pub fn save_screenshot(ctx: &egui::Context, image: &egui::ColorImage, path: Option<&str>, crop: Option<[f32; 4]>) -> Value {
-    save_screenshot_with_ppp(image, path, crop, ctx.pixels_per_point())
+pub fn save_screenshot(ctx: &egui::Context, image: &egui::ColorImage, path: Option<&str>, crop: Option<[f32; 4]>, raw: bool) -> Value {
+    save_screenshot_with_ppp(image, path, crop, ctx.pixels_per_point(), raw)
 }
 
 /// Intersect a crop rectangle in points with the captured image, converting through `ppp`.
@@ -683,7 +694,7 @@ fn crop_pixels(size: [usize; 2], crop: Option<[f32; 4]>, ppp: f32) -> Result<(us
 
 /// Save a screenshot whose scale was captured with the request. Hidden logic ticks must not read
 /// `Context::pixels_per_point()` for an image produced from a different UI pass.
-pub fn save_screenshot_with_ppp(image: &egui::ColorImage, path: Option<&str>, crop: Option<[f32; 4]>, ppp: f32) -> Value {
+pub fn save_screenshot_with_ppp(image: &egui::ColorImage, path: Option<&str>, crop: Option<[f32; 4]>, ppp: f32, raw: bool) -> Value {
     let ppp = if ppp.is_finite() && ppp > 0.0 { ppp } else { 1.0 };
     let (x0, y0, cw, ch) = match crop_pixels(image.size, crop, ppp) {
         Ok(rect) => rect,
@@ -707,7 +718,17 @@ pub fn save_screenshot_with_ppp(image: &egui::ColorImage, path: Option<&str>, cr
             Err(e) => json!({"ok": false, "error": e}),
         };
     }
-    let path = path.map(str::to_string).unwrap_or_else(|| filmcraft_engine::temp_dir().join("filmcraft-screenshot.png").to_string_lossy().to_string());
+    let path = path.map(str::to_string).unwrap_or_else(|| {
+        let name = if raw { "filmcraft-screenshot.rgba" } else { "filmcraft-screenshot.png" };
+        filmcraft_engine::temp_dir().join(name).to_string_lossy().to_string()
+    });
+    if raw {
+        // A recording tool reads the frames itself: skip the PNG encode, which is the slow part.
+        return match std::fs::write(&path, &rgba) {
+            Ok(()) => json!({"ok": true, "result": {"path": path, "width": cw, "height": ch, "format": "rgba"}}),
+            Err(e) => json!({"ok": false, "error": e.to_string()}),
+        };
+    }
     match encode_png(&rgba, cw as u32, ch as u32) {
         Ok(png) => match std::fs::write(&path, png) {
             Ok(()) => json!({"ok": true, "result": {"path": path, "width": cw, "height": ch}}),

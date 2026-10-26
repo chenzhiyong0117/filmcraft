@@ -49,8 +49,8 @@ impl FilmcraftApp {
                     }
                 }
                 control::Outcome::AfterInput => self.input_waiters.push(reply),
-                control::Outcome::Screenshot { path, crop } => {
-                    capture::admit(self, ctx, path, crop, reply);
+                control::Outcome::Screenshot { path, crop, raw, quick } => {
+                    capture::admit(self, ctx, path, crop, raw, quick, reply);
                 }
             }
         }
@@ -90,7 +90,7 @@ impl FilmcraftApp {
                     }
                 }
                 control::Outcome::AfterInput => self.input_waiters.push(reply),
-                control::Outcome::Screenshot { path, crop } => capture::admit(self, ctx, path, crop, reply),
+                control::Outcome::Screenshot { path, crop, raw, quick } => capture::admit(self, ctx, path, crop, raw, quick, reply),
             }
             if changes_layout {
                 let rest: Vec<_> = pending.collect();
