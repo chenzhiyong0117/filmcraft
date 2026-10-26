@@ -54,6 +54,12 @@ pub enum Outcome {
     Screenshot {
         path: Option<String>,
         crop: Option<[f32; 4]>,
+        /// Write the pixels as raw RGBA rows instead of PNG: a recording tool reads frames at
+        /// speed, and PNG encoding is the slow part.
+        raw: bool,
+        /// Skip the settle delay: the caller is capturing continuously and wants every frame it
+        /// can get, not a guaranteed-settled one.
+        quick: bool,
     },
 }
 
@@ -426,7 +432,9 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
             let crop = crop.or_else(|| s("id").and_then(|id| app.auto.find(id).map(|e| e.rect)));
             // Bring the window on screen so a frame is presented, without taking keyboard focus.
             app.raise_for_control(ctx);
-            Outcome::Screenshot { path: s("path").map(str::to_string), crop }
+            let raw = s("format").is_some_and(|f| f.eq_ignore_ascii_case("raw") || f.eq_ignore_ascii_case("rgba"));
+            let quick = p.get("quick").and_then(Value::as_bool).unwrap_or(false);
+            Outcome::Screenshot { path: s("path").map(str::to_string), crop, raw, quick }
         }
         "ui.resize" => {
             let w = p.get("width").and_then(Value::as_f64).unwrap_or(1600.0) as f32;
@@ -517,7 +525,7 @@ pub fn inspect(app: &FilmcraftApp, ctx: &egui::Context) -> Value {
 }
 
 /// Save a screenshot (optionally cropped to a rect in points) as PNG; returns the reply JSON.
-pub fn save_screenshot(ctx: &egui::Context, image: &egui::ColorImage, path: Option<&str>, crop: Option<[f32; 4]>) -> Value {
+pub fn save_screenshot(ctx: &egui::Context, image: &egui::ColorImage, path: Option<&str>, crop: Option<[f32; 4]>, raw: bool) -> Value {
     let ppp = ctx.pixels_per_point();
     let [w, h] = image.size;
     let (x0, y0, cw, ch) = match crop {
@@ -542,7 +550,16 @@ pub fn save_screenshot(ctx: &egui::Context, image: &egui::ColorImage, path: Opti
             Err(e) => json!({"ok": false, "error": e}),
         };
     }
-    let path = path.map(str::to_string).unwrap_or_else(|| filmcraft_engine::temp_dir().join("filmcraft-screenshot.png").to_string_lossy().to_string());
+    let path = path.map(str::to_string).unwrap_or_else(|| {
+        let name = if raw { "filmcraft-screenshot.rgba" } else { "filmcraft-screenshot.png" };
+        filmcraft_engine::temp_dir().join(name).to_string_lossy().to_string()
+    });
+    if raw {
+        return match std::fs::write(&path, &rgba) {
+            Ok(()) => json!({"ok": true, "result": {"path": path, "width": cw, "height": ch, "format": "rgba"}}),
+            Err(e) => json!({"ok": false, "error": e.to_string()}),
+        };
+    }
     match encode_png(&rgba, cw as u32, ch as u32) {
         Ok(png) => match std::fs::write(&path, png) {
             Ok(()) => json!({"ok": true, "result": {"path": path, "width": cw, "height": ch}}),

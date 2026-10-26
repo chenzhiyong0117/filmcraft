@@ -331,8 +331,8 @@ pub struct FilmcraftApp {
     /// Status message last shown and when it first appeared (messages expire after a few seconds).
     status_seen: (String, f64),
     /// Screenshots waiting for their frame: (token, path, crop, reply, give-up time).
-    pending_screenshots: Vec<(u64, Option<String>, Option<[f32; 4]>, Sender<Value>, f64)>,
-    queued_screenshots: Vec<(u64, f64, u32)>,
+    pending_screenshots: Vec<(u64, Option<String>, Option<[f32; 4]>, bool, Sender<Value>, f64)>,
+    queued_screenshots: Vec<(u64, f64, u32, u32)>,
     /// A paused monitor drew a stand-in (nearest cached) picture last frame: its exact frame is
     /// still decoding.
     pub(crate) monitor_inexact: bool,
@@ -1697,12 +1697,13 @@ impl FilmcraftApp {
                     }
                 }
                 control::Outcome::AfterInput => self.input_waiters.push(reply),
-                control::Outcome::Screenshot { path, crop } => {
+                control::Outcome::Screenshot { path, crop, raw, quick } => {
                     let token = self.next_token;
                     self.next_token += 1;
-                    let settle = ctx.input(|i| i.time) + 0.25;
-                    self.queued_screenshots.push((token, settle, 0));
-                    self.pending_screenshots.push((token, path, crop, reply, settle + SCREENSHOT_TIMEOUT_S));
+                    let settle = ctx.input(|i| i.time) + if quick { 0.0 } else { 0.25 };
+                    let need = if quick { 1 } else { 3 };
+                    self.queued_screenshots.push((token, settle, 0, need));
+                    self.pending_screenshots.push((token, path, crop, raw, reply, settle + SCREENSHOT_TIMEOUT_S));
                 }
             }
         }
@@ -1715,10 +1716,10 @@ impl FilmcraftApp {
     fn issue_screenshots(&mut self, ctx: &egui::Context, settled: bool) {
         let now = ctx.input(|i| i.time);
         let mut any = false;
-        self.queued_screenshots.retain_mut(|(token, at, frames)| {
+        self.queued_screenshots.retain_mut(|(token, at, frames, need)| {
             *frames += 1;
             any = true;
-            if now >= *at && *frames >= 3 && (settled || now >= *at + SCREENSHOT_SETTLE_MAX_S) {
+            if now >= *at && *frames >= *need && (settled || now >= *at + SCREENSHOT_SETTLE_MAX_S) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(*token)));
                 false
             } else {
@@ -1761,8 +1762,8 @@ impl FilmcraftApp {
         });
         for (token, image) in events {
             if let Some(i) = self.pending_screenshots.iter().position(|(t, ..)| *t == token) {
-                let (_, path, crop, reply, _) = self.pending_screenshots.remove(i);
-                let r = control::save_screenshot(ctx, &image, path.as_deref(), crop);
+                let (_, path, crop, raw, reply, _) = self.pending_screenshots.remove(i);
+                let r = control::save_screenshot(ctx, &image, path.as_deref(), crop, raw);
                 let _ = reply.send(r);
             }
         }
