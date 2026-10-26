@@ -235,6 +235,10 @@ impl CropTarget {
 struct Shot {
     token: u64,
     path: Option<String>,
+    /// Write raw RGBA rows instead of a PNG (a recording tool reads the frames itself).
+    raw: bool,
+    /// Skip the settle delay: a recording tool wants every frame it can get.
+    quick: bool,
     crop_target: Option<CropTarget>,
     /// The crop resolved from the accepted pass that was captured (set at issue time).
     crop: Option<[f32; 4]>,
@@ -347,7 +351,7 @@ fn refresh_identity(app: &mut FilmcraftApp, ctx: &egui::Context) {
 /// Admit one `ui.screenshot` request without issuing it. Counts queued, in-flight and
 /// completed-but-undrained requests and reserves the raw image plus its encode/encode-reply buffers
 /// before capture.
-pub(crate) fn admit(app: &mut FilmcraftApp, ctx: &egui::Context, path: Option<String>, crop: Option<CropTarget>, reply: Sender<Value>) {
+pub(crate) fn admit(app: &mut FilmcraftApp, ctx: &egui::Context, path: Option<String>, crop: Option<CropTarget>, raw: bool, quick: bool, reply: Sender<Value>) {
     refresh_identity(app, ctx);
     let token = next_token(&mut app.shots);
     let Some(geometry) = app.capture_geometry else {
@@ -356,15 +360,15 @@ pub(crate) fn admit(app: &mut FilmcraftApp, ctx: &egui::Context, path: Option<St
     let Some(expected) = geometry.expected_size() else {
         return reject(reply, token, "screenshot failed: the window has no capturable size yet");
     };
-    let Some(raw) = geometry.expected_bytes() else {
+    let Some(raw_bytes) = geometry.expected_bytes() else {
         return reject(reply, token, "screenshot failed: the window size overflows the screenshot budget");
     };
-    if raw > MAX_IMAGE_BYTES {
+    if raw_bytes > MAX_IMAGE_BYTES {
         return reject(
             reply,
             token,
             format!(
-                "screenshot budget exceeded: {raw} raw bytes for one {}×{} image, over the {MAX_IMAGE_BYTES}-byte per-image limit",
+                "screenshot budget exceeded: {raw_bytes} raw bytes for one {}×{} image, over the {MAX_IMAGE_BYTES}-byte per-image limit",
                 expected[0], expected[1]
             ),
         );
@@ -398,12 +402,16 @@ pub(crate) fn admit(app: &mut FilmcraftApp, ctx: &egui::Context, path: Option<St
     app.shots.requests.push(Shot {
         token,
         path,
+        raw,
+        quick,
         crop_target: crop,
         crop: None,
         crop_misses: 0,
         reply,
         deadline: now + DEADLINE,
-        ready_at: now + READY_DELAY,
+        // A quick capture is the recorder's next frame: it wants the one the window paints now,
+        // not a guaranteed-settled one.
+        ready_at: if quick { now } else { now + READY_DELAY },
         frames: 0,
         issued: false,
         document: geometry.document,
@@ -472,7 +480,7 @@ fn retry_geometry(app: &mut FilmcraftApp, ctx: &egui::Context, index: usize) -> 
     shot.reserved = reserved;
     shot.frames = 0;
     shot.crop_misses = 0;
-    shot.ready_at = now + READY_DELAY;
+    shot.ready_at = if shot.quick { now } else { now + READY_DELAY };
     shot.issued = false;
     Ok(())
 }
@@ -480,6 +488,11 @@ fn retry_geometry(app: &mut FilmcraftApp, ctx: &egui::Context, index: usize) -> 
 /// Whether an unissued request has waited for enough accepted passes, including the bounded
 /// maximum when the monitor is still showing an inexact frame or the timeline is animating.
 fn shot_is_settled(now: Instant, monitor_inexact: bool, timeline_still: u32, shot: &Shot) -> bool {
+    // A quick capture issues on the first accepted pass that reaches a settled moment at all:
+    // waiting for the monitor to show its exact frame would cap a recorder at a few frames a second.
+    if shot.quick {
+        return shot.frames >= 1;
+    }
     if now < shot.ready_at || shot.frames < SETTLE_PASSES {
         return false;
     }
@@ -654,7 +667,7 @@ fn image_reply(shot: &Shot, image: &ColorImage) -> Value {
         );
     }
     let captured_ppp = shot.geometry.surface.captured_pixels_per_point();
-    let mut reply = crate::control::save_screenshot_with_ppp(image, shot.path.as_deref(), shot.crop, captured_ppp);
+    let mut reply = crate::control::save_screenshot_with_ppp(image, shot.path.as_deref(), shot.crop, captured_ppp, shot.raw);
     if let Some(object) = reply.as_object_mut() {
         object.insert("request".into(), json!(shot.token));
     }

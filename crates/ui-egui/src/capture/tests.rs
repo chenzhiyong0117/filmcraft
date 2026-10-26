@@ -37,7 +37,7 @@ fn admit_one(app: &mut FilmcraftApp, ctx: &egui::Context) -> (Receiver<Value>, u
 fn admit_with_surface(app: &mut FilmcraftApp, ctx: &egui::Context, surface: SurfaceGeometry) -> (Receiver<Value>, u64) {
     app.capture_geometry = Some(CaptureGeometry { surface, document: active_document(app), focus: None });
     let (tx, rx) = channel();
-    admit(app, ctx, None, None, tx);
+    admit(app, ctx, None, None, false, false, tx);
     let token = app.shots.requests.last().map(|shot| shot.token).unwrap_or_default();
     (rx, token)
 }
@@ -223,7 +223,7 @@ fn admission_counts_outstanding_and_completed_but_undrained_requests() {
     let image = Arc::new(ColorImage::filled([800, 600], Color32::RED));
     app.shots.requests[0].callback.take().expect("a callback").complete(image);
     let (tx, rx) = channel();
-    admit(&mut app, &ctx, None, None, tx);
+    admit(&mut app, &ctx, None, None, false, false, tx);
     assert_eq!(app.shots.requests.len(), MAX_REQUESTS, "the fifth request is rejected, not admitted");
     let reply = rx.recv().expect("a rejection reply");
     assert_eq!(reply["ok"], false);
@@ -261,7 +261,7 @@ fn near_limit_images_are_rejected_for_encode_buffer_memory() {
         focus: None,
     });
     let (tx, rx) = channel();
-    admit(&mut app, &ctx, None, None, tx);
+    admit(&mut app, &ctx, None, None, false, false, tx);
     assert!(app.shots.requests.is_empty(), "the image is rejected before a slot or buffer is created");
     let reply = rx.recv().expect("a rejection reply");
     assert_eq!(reply["ok"], false);
