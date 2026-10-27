@@ -443,6 +443,10 @@ pub struct UiState {
     pub workspace: String,
     /// The panel arrangement in use: craft-ui's frame tree and floating windows.
     pub dock: crate::dock::Layout,
+    /// A caption the timeline just took the playhead to: on the next frame the Text panel's list
+    /// scrolls that row into view, so clicking a caption block lands on its text (#caption-click).
+    #[serde(skip)]
+    pub caption_reveal: Option<u64>,
     /// Where each panel closed while floating was ([x, y, width, height]): opening it again
     /// brings it back there, floating, instead of docked (#1985).
     #[serde(default)]
@@ -978,6 +982,7 @@ impl Default for UiState {
             tool: Tool::Selection,
             mode: Mode::Edit,
             workspace: "Editing".into(),
+            caption_reveal: None,
             closed_floating: vec![],
             dock: crate::dock::workspace("Editing"),
             focused: PanelKind::Timeline,

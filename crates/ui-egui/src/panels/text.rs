@@ -186,6 +186,9 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if current.is_none() {
         ui.data_mut(|d| d.remove::<u64>(egui::Id::unique("caption-follow")));
     }
+    // A block clicked in the timeline asks for its row here, once: see `UiState::caption_reveal`.
+    let reveal = app.ui.caption_reveal;
+    let mut revealed = false;
     egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("caption-scroll").show(&mut child, |ui| {
         ui.set_width(list.width() - 12.0);
         let mut shown = 0;
@@ -278,6 +281,12 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 });
             });
             let row = fr.response.rect;
+            if reveal == Some(c.id.0) {
+                if !list.contains(row.center()) {
+                    ui.scroll_to_rect(row, Some(egui::Align::Center));
+                }
+                revealed = true;
+            }
             if current == Some(c.id) {
                 ui.painter().rect_stroke(row, 3.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
                 // the list follows the playhead: each caption it reaches is brought to the middle
@@ -302,6 +311,9 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             );
         }
     });
+    if revealed {
+        app.ui.caption_reveal = None;
+    }
     run(app, ui, actions);
 }
 
