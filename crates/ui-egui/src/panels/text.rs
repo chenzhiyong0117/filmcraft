@@ -183,6 +183,8 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let q = app.ui.caption_search.to_lowercase();
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(list.shrink(4.0)).id_salt("caption-list"));
     let current = track.caption_at(ph).map(|c| c.id);
+    let reveal = app.ui.caption_reveal;
+    let mut revealed = false;
     egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("caption-scroll").show(&mut child, |ui| {
         ui.set_width(list.width() - 12.0);
         let mut shown = 0;
@@ -269,6 +271,12 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 });
             });
             let row = fr.response.rect;
+            if reveal == Some(c.id.0) {
+                if !list.contains(row.center()) {
+                    ui.scroll_to_rect(row, Some(egui::Align::Center));
+                }
+                revealed = true;
+            }
             if current == Some(c.id) {
                 ui.painter().rect_stroke(row, 3.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
             }
@@ -286,6 +294,9 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             );
         }
     });
+    if revealed {
+        app.ui.caption_reveal = None;
+    }
     run(app, ui, actions);
 }
 

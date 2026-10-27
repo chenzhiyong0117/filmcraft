@@ -228,6 +228,7 @@ fn interact_block(
     if resp.double_clicked() {
         app.show_panel(PanelKind::Text);
         app.ui.text_tab = "Captions".into();
+        app.ui.caption_reveal = Some(c.id.0);
         actions.push(("captions.goTo".into(), json!({"caption": c.id.0})));
         return;
     }
@@ -248,6 +249,14 @@ fn interact_block(
         if add {
             actions.push(("captions.select".into(), json!({"captions": [c.id.0], "add": true})));
         } else {
+            // the Text panel's list scrolls to this caption, so the block and its text stay in view
+            // together; showing the panel is what makes that reveal worth anything
+            let shown = app.ui.dock.contains(PanelKind::Text) || app.ui.floating.iter().any(|g| g.panels.contains(&PanelKind::Text));
+            if !shown {
+                app.show_panel(PanelKind::Text);
+                app.ui.text_tab = "Captions".into();
+            }
+            app.ui.caption_reveal = Some(c.id.0);
             actions.push(("captions.goTo".into(), json!({"caption": c.id.0})));
         }
     }

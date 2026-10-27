@@ -445,6 +445,10 @@ pub struct UiState {
     /// monitor.
     #[serde(default)]
     pub panel_windows: Vec<crate::dock::PanelWindow>,
+    /// A caption the timeline just took the playhead to: on the next frame the Text panel's list
+    /// scrolls that row into view, so clicking a caption block lands on its text (#caption-click).
+    #[serde(skip)]
+    pub caption_reveal: Option<u64>,
     /// Where each panel closed while floating was ([x, y, width, height]): opening it again
     /// brings it back there, floating, instead of docked (#1985).
     #[serde(default)]
@@ -974,6 +978,7 @@ impl Default for UiState {
             workspace: "Editing".into(),
             floating: vec![],
             panel_windows: vec![],
+            caption_reveal: None,
             closed_floating: vec![],
             dock: crate::dock::workspace("Editing"),
             focused: PanelKind::Timeline,
