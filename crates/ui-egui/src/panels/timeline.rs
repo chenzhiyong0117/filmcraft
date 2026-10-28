@@ -32,7 +32,14 @@ const DIVIDER_H: f32 = 5.0;
 const MASTER_H: f32 = 34.0;
 /// The selected gap between two clips (#648, #668).
 const GAP_FILL: Color32 = Color32::from_gray(224);
-const SNAP_PX: f32 = 9.0;
+/// How close, in points of pointer x, a drag comes to an edit before it snaps.
+const SNAP_PX: f32 = 8.0;
+/// How far the pointer must move past a snap point before the drag lets go of it: releasing only
+/// beyond [`SNAP_PX`] would flicker in and out of the snap while the pointer sits near the edge.
+const SNAP_RELEASE_PX: f32 = SNAP_PX * 1.6;
+/// A point the drag broke free of is left alone until the pointer is this far past it, so a drag
+/// that leaves a snap does not immediately pick it up again.
+const SNAP_REARM_PX: f32 = SNAP_PX * 2.0;
 
 /// Waveform peaks are kept per audio stream: (item, index into the media's `audio_streams`).
 pub type PeakKey = (ItemId, usize);
@@ -49,6 +56,11 @@ pub struct TlState {
     pub layout: Option<Layout>,
     /// Snap indicator x (screen) this frame.
     snap_x: Option<f32>,
+    /// The snap point each end of the dragged block is stuck to (start, end): the snap is sticky so
+    /// a drag does not flutter between the free and the snapped position at a neighbouring edge.
+    snap_stick: [Option<Tick>; 2],
+    /// Points a drag broke free of, per end of the block, ignored until the pointer is well away.
+    snap_free: [Vec<Tick>; 2],
     pub peaks: Arc<Mutex<HashMap<PeakKey, Arc<Vec<(f32, f32)>>>>>,
     peaks_pending: Arc<Mutex<Vec<PeakKey>>>,
     /// Nested sequences have waveforms too, of their mix. Unlike media a sequence changes: this is
@@ -103,8 +115,9 @@ pub enum Drag {
         /// #1104: the pointer is in the empty space past the last track of the dragged clips' kind:
         /// the drop moves them onto a new track there.
         new_track: Option<(TrackKind, Rect)>,
-        /// Option is held: the drop copies the clips instead of moving them (as of the last
-        /// drag frame, so letting go of both at once still copies).
+        /// Option is held on the last drag frame: the previews the drop would copy are drawn as
+        /// ghosts. The drop itself reads Option anew (see the release), so letting go of it first
+        /// moves instead.
         copy: bool,
     },
     Trim {
@@ -1778,19 +1791,52 @@ fn vertical_scrollbar(ui: &mut egui::Ui, bar: Rect, value: &mut f32, max: f32, i
     }
 }
 
+/// Which end of the dragged block a snap point is for: the sticky release is kept per end, so the
+/// two ends snap independently.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapSide {
+    Start,
+    End,
+}
+
+impl SnapSide {
+    fn slot(self) -> usize {
+        match self {
+            SnapSide::Start => 0,
+            SnapSide::End => 1,
+        }
+    }
+}
+
 /// Snap `t` to nearby candidates (edits, playhead, markers, in/out). Returns snapped tick.
-fn snap(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick, exclude: &[ClipId]) -> Tick {
-    snap_to(app, seq, layout, t, exclude, true)
+fn snap(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick, exclude: &[ClipId], mods: egui::Modifiers) -> Tick {
+    snap_to(app, seq, layout, t, exclude, true, None, mods)
+}
+
+/// [`snap`] for one end of the dragged block, with the sticky hysteresis that end keeps.
+fn snap_side(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick, exclude: &[ClipId], side: SnapSide, mods: egui::Modifiers) -> Tick {
+    snap_to(app, seq, layout, t, exclude, true, Some(side), mods)
 }
 
 /// Where a dragged playhead lands: [`snap`], but not onto itself, or it would stick where it is
 /// and only move in jumps of `SNAP_PX` (#164).
-fn snap_playhead(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick) -> Tick {
-    snap_to(app, seq, layout, t, &[], false)
+fn snap_playhead(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick, mods: egui::Modifiers) -> Tick {
+    snap_to(app, seq, layout, t, &[], false, None, mods)
 }
 
-fn snap_to(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick, exclude: &[ClipId], to_playhead: bool) -> Tick {
-    if !app.session.state.snapping {
+fn snap_to(
+    app: &mut FilmcraftApp,
+    seq: &Sequence,
+    layout: &Layout,
+    t: Tick,
+    exclude: &[ClipId],
+    to_playhead: bool,
+    side: Option<SnapSide>,
+    mods: egui::Modifiers,
+) -> Tick {
+    // Snapping is off, or Option (Alt) is held: Alt is read every frame, so it can be pressed and
+    // let go in the middle of a drag to place the clip freely.
+    if !app.session.state.snapping || mods.alt {
         return t;
     }
     let mut cands: Vec<Tick> = Vec::with_capacity(64);
@@ -1810,8 +1856,25 @@ fn snap_to(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick, exc
     cands.extend(seq.mark_in);
     cands.extend(seq.mark_out);
     let x = layout.x_of(t);
+    if let Some(slot) = side.map(SnapSide::slot) {
+        // Sticky: stay on the point while the pointer is still near it, however far the block has
+        // moved, so a drag along an edge does not flicker in and out of the snap.
+        if let Some(stuck) = app.tl.snap_stick[slot] {
+            if (layout.x_of(stuck) - x).abs() <= SNAP_RELEASE_PX {
+                app.tl.snap_x = Some(layout.x_of(stuck));
+                return stuck;
+            }
+            app.tl.snap_stick[slot] = None;
+            app.tl.snap_free[slot].push(stuck);
+        }
+        // A point the drag broke free of stays out of reach until the pointer is well past it.
+        app.tl.snap_free[slot].retain(|c| (layout.x_of(*c) - x).abs() < SNAP_REARM_PX);
+    }
     let mut best: Option<(f32, Tick)> = None;
     for c in cands {
+        if side.is_some_and(|s| app.tl.snap_free[s.slot()].contains(&c)) {
+            continue;
+        }
         let d = (layout.x_of(c) - x).abs();
         if d < SNAP_PX && best.is_none_or(|b| d < b.0) {
             best = Some((d, c));
@@ -1820,6 +1883,9 @@ fn snap_to(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick, exc
     match best {
         Some((_, c)) => {
             app.tl.snap_x = Some(layout.x_of(c));
+            if let Some(slot) = side.map(SnapSide::slot) {
+                app.tl.snap_stick[slot] = Some(c);
+            }
             c
         }
         None => t,
@@ -2244,11 +2310,11 @@ pub(crate) fn wheel_input(ctx: &egui::Context) -> WheelInput {
 }
 
 /// Puts the playhead where the pointer is on the ruler: what a press does before any drag (#1090).
-fn scrub_playhead(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, p: Pos2, shift: bool) {
+fn scrub_playhead(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, p: Pos2, mods: egui::Modifiers) {
     app.stop();
     let mut tt = seq.settings.frame_rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO));
-    if shift || app.session.prefs.timeline.snap_playhead {
-        tt = snap_playhead(app, seq, layout, tt);
+    if mods.shift || app.session.prefs.timeline.snap_playhead {
+        tt = snap_playhead(app, seq, layout, tt, mods);
     }
     // a press on a marker selects it: the playhead goes exactly onto it (#695)
     if let Some(m) = marker_at(seq, layout, p) {
@@ -2280,7 +2346,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
         let grab = grab_at(seq, layout, p, tool, mods, roll_ripple);
         // the playhead jumps to a press on the ruler at once, not only once the pointer has moved (#1090)
         if matches!(grab, Grab::Other(Hit::Ruler)) {
-            scrub_playhead(app, seq, layout, p, mods.shift);
+            scrub_playhead(app, seq, layout, p, mods);
         }
         app.tl.pressed = Some(Pressed { pos: p, tick: layout.tick_at(p.x), grab });
     }
@@ -2371,7 +2437,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             && let Grab::Other(Hit::Clip { track, .. }) = g
             && let Some(row) = layout.rows.iter().find(|r| r.track == track)
         {
-            let t = snap(app, seq, layout, rate.snap_nearest(layout.tick_at(p.x)), &[]);
+            let t = snap(app, seq, layout, rate.snap_nearest(layout.tick_at(p.x)), &[], mods);
             let x = layout.x_of(t);
             ui.painter().line_segment([pos2(x, row.rect.min.y), pos2(x, row.rect.max.y)], Stroke::new(1.0, Color32::WHITE));
         }
@@ -2379,6 +2445,8 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
 
     // ---- press: act on what was under the pointer when the button went down (#259)
     if !app.tl.cancelled && (resp.drag_started() || (resp.clicked() && app.tl.drag.is_none())) {
+        app.tl.snap_stick = [None; 2];
+        app.tl.snap_free = [Vec::new(), Vec::new()];
         let pressed = match app.tl.pressed.take() {
             Some(pr) => pr,
             // a press and release in the same frame is never stored: it happened where egui says
@@ -2414,7 +2482,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             }
             (Tool::Razor, Grab::Other(Hit::Clip { clip, .. })) => {
                 if resp.clicked() || resp.drag_started() {
-                    let tt = snap(app, seq, layout, rate.snap_nearest(t), &[]);
+                    let tt = snap(app, seq, layout, rate.snap_nearest(t), &[], mods);
                     let r = if mods.shift {
                         app.session.execute("timeline.razor", json!({"time": tt.0}))
                     } else {
@@ -2551,7 +2619,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
         });
         if let Some(d) = started {
             if matches!(d, Drag::Scrub { .. }) {
-                scrub_playhead(app, seq, layout, p, mods.shift);
+                scrub_playhead(app, seq, layout, p, mods);
             }
             if resp.drag_started() {
                 app.tl.drag = Some(d);
@@ -2600,7 +2668,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 let mut tt = rate.snap_nearest(t_here.max(Tick::ZERO));
                 // Shift snaps; Settings ▸ Timeline ▸ "Snap playhead in Timeline when Snap is enabled"
                 if mods.shift || app.session.prefs.timeline.snap_playhead {
-                    tt = snap_playhead(app, seq, layout, tt);
+                    tt = snap_playhead(app, seq, layout, tt, mods);
                 }
                 app.session.set_playhead(tt);
                 Some(Drag::Scrub { initial })
@@ -2618,8 +2686,8 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 // snap the moved block's start or end
                 let first = clips.iter().filter_map(|c| seq.find_item(*c).map(|(_, i)| i.start)).min().unwrap_or_default();
                 let last = clips.iter().filter_map(|c| seq.find_item(*c).map(|(_, i)| i.end())).max().unwrap_or_default();
-                let s1 = snap(app, seq, layout, first + raw, &clips) - first;
-                let offset = if s1 != raw { s1 } else { snap(app, seq, layout, last + raw, &clips) - last };
+                let s1 = snap_side(app, seq, layout, first + raw, &clips, SnapSide::Start, mods) - first;
+                let offset = if s1 != raw { s1 } else { snap_side(app, seq, layout, last + raw, &clips, SnapSide::End, mods) - last };
                 let offset = offset.max(-first);
                 let cur_row = layout.row_at(p.y);
                 let start_row = layout.rows.iter().find(|r| r.track == start_track);
@@ -2643,7 +2711,8 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             }
             Drag::Trim { clip, edge, mode, from, .. } => seq.find_item(clip).map(|(_, it)| {
                 let base = if edge == filmcraft_edit::Edge::In { it.start } else { it.end() };
-                let target = snap(app, seq, layout, rate.snap_nearest(base + (t_here - from)), &[clip]);
+                let side = if edge == filmcraft_edit::Edge::In { SnapSide::Start } else { SnapSide::End };
+                let target = snap_side(app, seq, layout, rate.snap_nearest(base + (t_here - from)), &[clip], side, mods);
                 // stop at the end of the media (or the neighbour), as the trim on release will (#653)
                 let delta = filmcraft_engine::commands::trim_delta(&app.session, clip, edge, mode, target - base).unwrap_or(target - base);
                 Drag::Trim { clip, edge, mode, delta, from }
@@ -2654,11 +2723,12 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             }),
             Drag::Stretch { clip, edge, from, .. } => seq.find_item(clip).map(|(_, it)| {
                 let base = if edge == filmcraft_edit::Edge::In { it.start } else { it.end() };
-                let target = snap(app, seq, layout, rate.snap_nearest(base + (t_here - from)), &[clip]);
+                let side = if edge == filmcraft_edit::Edge::In { SnapSide::Start } else { SnapSide::End };
+                let target = snap_side(app, seq, layout, rate.snap_nearest(base + (t_here - from)), &[clip], side, mods);
                 Drag::Stretch { clip, edge, delta: target - base, from }
             }),
             Drag::Roll { left, right, from, .. } => seq.find_item(left).map(|(_, l)| {
-                let target = snap(app, seq, layout, rate.snap_nearest(l.end() + (t_here - from)), &[left, right]);
+                let target = snap_side(app, seq, layout, rate.snap_nearest(l.end() + (t_here - from)), &[left, right], SnapSide::End, mods);
                 Drag::Roll { left, right, delta: target - l.end(), from }
             }),
             Drag::Slip { clip, .. } => {
@@ -2724,15 +2794,17 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
         let cancelled = std::mem::take(&mut app.tl.cancelled);
         if !cancelled && let Some(d) = app.tl.drag.take() {
             let r = match d {
-                Drag::Move { clips, offset, track_delta, new_track, copy, .. } if offset != Tick::ZERO || track_delta != 0 || new_track.is_some() => {
+                Drag::Move { clips, offset, track_delta, new_track, copy: _, .. } if offset != Tick::ZERO || track_delta != 0 || new_track.is_some() => {
                     // #1104: dropped past the last track, the clips go onto a new one
                     let to = |tid| new_track.map_or_else(|| json!(shift_track(seq, tid, track_delta).unwrap_or(tid).0), |_| json!("new"));
                     let moves: Vec<Value> = clips
                         .iter()
                         .filter_map(|c| seq.find_item(*c).map(|(tid, it)| json!({"clip": c.0, "track": to(tid), "time": (it.start + offset).max(Tick::ZERO).0})))
                         .collect();
-                    // Option held while dropping copies (Premiere: Option-drag duplicates)
-                    Some(app.session.execute("timeline.move", json!({"moves": moves, "insert": mods.command, "linked": false, "copy": copy || mods.alt})))
+                    // Option held while dropping copies (Premiere: Option-drag duplicates). Read
+                    // the key at the drop, not on the last drag frame: letting go of Option first
+                    // then makes the drop move, which the Option snap bypass relies on.
+                    Some(app.session.execute("timeline.move", json!({"moves": moves, "insert": mods.command, "linked": false, "copy": mods.alt})))
                 }
                 Drag::Trim { clip, edge, mode, delta, .. } if delta != Tick::ZERO => Some(app.session.execute(
                     "timeline.trim",
@@ -2950,7 +3022,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 TrackKind::Audio => s.audio,
             })
         });
-        let t = snap(app, seq, layout, rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO)), &[]);
+        let t = snap(app, seq, layout, rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO)), &[], mods);
         let still = app.session.prefs.timeline.still_duration(rate);
         let is_still = app.session.project.item(item).and_then(|i| i.as_media()).is_some_and(|m| m.info.kind == filmcraft_media::MediaKind::Still);
         let dur = source
@@ -3012,7 +3084,8 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
         && layout.content.contains(p)
         && app.timeline_drop_target(ui.ctx(), p)
     {
-        let t = snap(app, seq, layout, rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO)), &[]);
+        let mods = ctx.input(|i| i.modifiers);
+        let t = snap(app, seq, layout, rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO)), &[], mods);
         let row = layout.row_at(p.y).cloned().filter(|r| r.kind == TrackKind::Video);
         if let Some(row) = &row {
             let r = Rect::from_min_max(pos2(layout.x_of(t), row.rect.min.y + 1.0), pos2(layout.x_of(t) + 60.0, row.rect.max.y - 1.0));
@@ -3098,7 +3171,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 TrackKind::Video => (Some(row.track.0), seq.audio_tracks.get(row.index).or(seq.audio_tracks.first()).map(|t| t.id.0)),
                 TrackKind::Audio => (seq.video_tracks.get(row.index).or(seq.video_tracks.first()).map(|t| t.id.0), Some(row.track.0)),
             };
-            let start = snap(app, seq, layout, rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO)), &[]);
+            let start = snap(app, seq, layout, rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO)), &[], mods);
             // one command, one undo step: the files go end to end from the drop point
             let ids: Vec<u64> = items.iter().map(|i| i.0).collect();
             let params = json!({"items": ids, "track": vt, "audioTrack": at, "time": start.0, "insert": false});
@@ -3114,7 +3187,8 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
     {
         let row = layout.row_at(p.y).cloned().or_else(|| layout.rows.iter().find(|r| r.kind == TrackKind::Video).cloned());
         if let Some(row) = row {
-            let t = snap(app, seq, layout, rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO)), &[]);
+            let mods = ctx.input(|i| i.modifiers);
+            let t = snap(app, seq, layout, rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO)), &[], mods);
             let x = layout.x_of(t);
             let r = Rect::from_min_max(pos2(x, row.rect.min.y + 1.0), pos2((x + 120.0).min(layout.content.max.x), row.rect.max.y - 1.0));
             ui.painter().rect_filled(r, 3.0, Color32::from_white_alpha(40));
