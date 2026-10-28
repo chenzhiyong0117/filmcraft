@@ -129,6 +129,7 @@ fn payload_id() -> egui::Id {
 }
 
 pub fn start_drag_source(ui: &egui::Ui, source: source_drag::SourceDrag) {
+    record_drag_origin(ui);
     ui.ctx().data_mut(|d| d.insert_temp(payload_id(), Some(DragPayloadBox(DragPayload::Source(source)))));
 }
 pub fn dragged_source(ui: &egui::Ui) -> Option<source_drag::SourceDrag> {
@@ -138,9 +139,11 @@ pub fn dragged_source(ui: &egui::Ui) -> Option<source_drag::SourceDrag> {
     }
 }
 pub fn start_drag_item(ui: &egui::Ui, item: ItemId) {
+    record_drag_origin(ui);
     ui.ctx().data_mut(|d| d.insert_temp(payload_id(), Some(DragPayloadBox(DragPayload::Item(item)))));
 }
 pub fn start_drag_bin(ui: &egui::Ui, bin: u64) {
+    record_drag_origin(ui);
     ui.ctx().data_mut(|d| d.insert_temp(payload_id(), Some(DragPayloadBox(DragPayload::Bin(bin)))));
 }
 pub fn dragged_bin(ui: &egui::Ui) -> Option<u64> {
@@ -150,6 +153,7 @@ pub fn dragged_bin(ui: &egui::Ui) -> Option<u64> {
     }
 }
 pub fn start_drag_template(ui: &egui::Ui, id: &str, name: &str) {
+    record_drag_origin(ui);
     ui.ctx().data_mut(|d| d.insert_temp(payload_id(), Some(DragPayloadBox(DragPayload::Template(id.to_string(), name.to_string())))));
 }
 pub fn dragged_template(ui: &egui::Ui) -> Option<String> {
@@ -159,6 +163,7 @@ pub fn dragged_template(ui: &egui::Ui) -> Option<String> {
     }
 }
 pub fn start_drag_effect(ui: &egui::Ui, id: &str) {
+    record_drag_origin(ui);
     ui.ctx().data_mut(|d| d.insert_temp(payload_id(), Some(DragPayloadBox(DragPayload::Effect(id.to_string())))));
 }
 /// Prefix of a dragged effect payload that names a Lumetri preset rather than an effect id.
@@ -228,18 +233,102 @@ pub fn drag_cancelled(ui: &egui::Ui) -> bool {
     ui.ctx().data(|d| d.get_temp::<bool>(cancelled_id())).unwrap_or(false)
 }
 
+/// Where a drag started: its viewport and that viewport's screen top left (ui points).
+type DragOrigin = (egui::ViewportId, Option<egui::Pos2>);
+/// The pointer of a drag that began in another native window, in screen points, and whether the
+/// button has been released there.
+type DragLink = (egui::Pos2, bool);
+
+fn drag_origin_id() -> egui::Id {
+    egui::Id::unique("filmcraft-drag-origin")
+}
+
+fn drag_link_id() -> egui::Id {
+    egui::Id::unique("filmcraft-drag-link")
+}
+
+/// Note where a drag starts, so a drop target in another native window can follow it.
+fn record_drag_origin(ui: &egui::Ui) {
+    let ctx = ui.ctx();
+    let origin = ctx.viewport_id();
+    let min = ctx.input(|i| i.viewport().inner_rect.map(|r| r.min));
+    ctx.data_mut(|d| {
+        d.insert_temp(drag_origin_id(), (origin, min));
+        d.insert_temp(drag_link_id(), None::<DragLink>);
+    });
+}
+
+/// Called while rendering a panel's own native window: the main window never receives that
+/// window's pointer events, so publish the drag's screen pointer and its release for the
+/// Timeline to follow there.
+pub fn publish_window_drag(ctx: &egui::Context) {
+    let Some((origin, Some(origin_min))) = ctx.data(|d| d.get_temp::<DragOrigin>(drag_origin_id())) else { return };
+    if origin == egui::ViewportId::ROOT || origin != ctx.viewport_id() {
+        return;
+    }
+    // during a drag the pointer often leaves this window: keep following `interact_pos`, which
+    // egui holds for the whole press even when the cursor is outside the window
+    let Some(p) = ctx.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos())) else { return };
+    let released = ctx.input(|i| i.pointer.any_released());
+    let screen = origin_min + p.to_vec2();
+    ctx.data_mut(|d| d.insert_temp(drag_link_id(), Some((screen, released))));
+    ctx.request_repaint_of(egui::ViewportId::ROOT);
+}
+
+/// The viewport a drag started in, if a drag started through one of the helpers above.
+fn drag_origin(ctx: &egui::Context) -> Option<egui::ViewportId> {
+    ctx.data(|d| d.get_temp::<DragOrigin>(drag_origin_id())).map(|(origin, _)| origin)
+}
+
+fn window_drag(ctx: &egui::Context) -> Option<DragLink> {
+    let (origin, _) = ctx.data(|d| d.get_temp::<DragOrigin>(drag_origin_id()))?;
+    if origin == egui::ViewportId::ROOT || origin == ctx.viewport_id() {
+        return None;
+    }
+    ctx.data(|d| d.get_temp::<Option<DragLink>>(drag_link_id())).flatten()
+}
+
+/// The pointer of a drag that began in another native window, in this window's coordinates.
+pub fn window_drag_pointer(ctx: &egui::Context) -> Option<egui::Pos2> {
+    let (screen, _) = window_drag(ctx)?;
+    let min = ctx.input(|i| i.viewport().inner_rect.map(|r| r.min))?;
+    Some(screen - min.to_vec2())
+}
+
+/// Whether a drag that began in another native window has been released there.
+pub fn window_drag_released(ctx: &egui::Context) -> bool {
+    window_drag(ctx).is_some_and(|(_, released)| released)
+}
+
+/// The main window consumed a drag that began in another window: forget its pointer.
+pub fn clear_window_drag(ctx: &egui::Context) {
+    ctx.data_mut(|d| {
+        d.remove::<DragOrigin>(drag_origin_id());
+        d.remove::<Option<DragLink>>(drag_link_id());
+    });
+}
+
 /// Draw the drag ghost near the pointer and clear the payload after release. Escape cancels it.
 pub fn drag_ghost(app: &FilmcraftApp, ui: &egui::Ui) {
-    if !ui.ctx().input(|i| i.pointer.any_down()) {
-        ui.ctx().data_mut(|d| d.remove::<bool>(cancelled_id()));
+    let ctx = ui.ctx();
+    // a drag can start in a panel's own native window: every other window is only an observer and
+    // must not clear the payload, which belongs to the window that saw the press
+    let cross = window_drag(ctx);
+    let local = drag_origin(ctx).is_none_or(|origin| origin == ctx.viewport_id());
+    let down = if local { ctx.input(|i| i.pointer.any_down()) } else { cross.is_some_and(|(_, released)| !released) };
+    let released = if local { ctx.input(|i| i.pointer.any_released()) } else { cross.is_some_and(|(_, released)| released) };
+    if !down {
+        ctx.data_mut(|d| d.remove::<bool>(cancelled_id()));
     }
     let Some(pl) = payload(ui) else { return };
-    let ctx = ui.ctx();
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    if local && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         cancel_drag(ui);
         return;
     }
-    if let Some(p) = ctx.pointer_hover_pos() {
+    if down {
+        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+    if let Some(p) = ctx.pointer_hover_pos().or_else(|| window_drag_pointer(ctx)) {
         let label = match &pl {
             DragPayload::Item(i) => match dragged_selection(app, *i).len() {
                 1 => app.session.project.item(*i).map(|x| x.name.clone()).unwrap_or_default(),
@@ -267,7 +356,11 @@ pub fn drag_ghost(app: &FilmcraftApp, ui: &egui::Ui) {
         painter.rect_filled(r, 4.0, Color32::from_black_alpha(200));
         painter.text(r.center(), Align2::CENTER_CENTER, label, Tokens::ui(11.5), Color32::WHITE);
     }
-    if ctx.input(|i| i.pointer.any_released()) {
+    if !local {
+        // the Timeline consumes the drop and clears it; the window that saw the press does too
+        return;
+    }
+    if released {
         // cleared next frame so drop targets see the release this frame
         let f = ctx.cumulative_frame_nr();
         let k = egui::Id::unique("drag-release-frame");
@@ -281,7 +374,7 @@ pub fn drag_ghost(app: &FilmcraftApp, ui: &egui::Ui) {
             }
             Some(_) => {}
         }
-    } else if !ctx.input(|i| i.pointer.any_down()) {
+    } else if !down {
         clear_drag(ui);
     }
 }
