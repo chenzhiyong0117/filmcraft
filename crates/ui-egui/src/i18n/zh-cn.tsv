@@ -3551,6 +3551,8 @@
 	Undock Panel	取消面板停靠
 	Open Panel in New Window	在独立窗口中打开面板
 	Move Panel into Main Window	将面板移回主窗口
+	Move into Another Floating Window	移入其他浮窗
+	Move Panel to Its Own Window	将面板移到独立窗口
 	Project Notes	项目备注
 	Get Project Notes	获取项目备注
 	Edit Project Notes	编辑项目备注

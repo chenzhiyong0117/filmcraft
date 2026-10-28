@@ -321,6 +321,38 @@ pub fn panel_menu_popup(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
                             close = true;
                         }
                     }
+                    // Panels pulled out onto another display sit in one window per group: a
+                    // context-menu move joins two of those windows into one, with both panels as
+                    // tabs. Crossing windows with the pointer can't work (each window only sees
+                    // its own), so this is the way to merge them.
+                    let targets = app.merge_targets(p);
+                    if !targets.is_empty() {
+                        let sub = ui.menu_button(tl!("Move into Another Floating Window"), |ui| {
+                            for (into, label) in &targets {
+                                let r = ui.button(label);
+                                app.auto.add(&format!("panel.menu.{}.merge.{}", p.id(), into.id()), r.rect, label);
+                                if r.clicked() {
+                                    let params = serde_json::json!({"panel": p.id(), "into": into.id()});
+                                    if let Err(error) = crate::menus::invoke(app, ui.ctx(), "window.mergePanelWindow", params) {
+                                        app.ui.status = error;
+                                    }
+                                    close = true;
+                                }
+                            }
+                        });
+                        app.auto.add(&format!("panel.menu.{}.merge", p.id()), sub.response.rect, "Move into Another Floating Window");
+                    }
+                    // ... and a tab of a shared floating group can leave as its own window again.
+                    if app.can_split_panel_window(p) {
+                        let r = ui.button(tl!("Move Panel to Its Own Window"));
+                        app.auto.add(&format!("panel.menu.{}.splitWindow", p.id()), r.rect, "Move Panel to Its Own Window");
+                        if r.clicked() {
+                            if let Err(error) = crate::menus::invoke(app, ui.ctx(), "window.splitPanelWindow", serde_json::json!({"panel": p.id()})) {
+                                app.ui.status = error;
+                            }
+                            close = true;
+                        }
+                    }
                     let maximized = app.ui.keys.maximized.is_some_and(|q| app.ui.dock.contains(q) || app.ui.floating.iter().any(|g| g.panels.contains(&q)));
                     let r = ui.button(if maximized { tl!("Restore Frame") } else { tl!("Maximize Frame") });
                     app.auto.add(&format!("panel.menu.{}.maximize", p.id()), r.rect, if maximized { "Restore Frame" } else { "Maximize Frame" });
