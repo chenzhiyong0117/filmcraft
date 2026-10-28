@@ -458,6 +458,11 @@ impl DockContent<PanelKind> for FilmContent<'_> {
         // A panel in its own OS window draws in that window's coordinates: its automation
         // elements carry the window so they are not matched against main-window points.
         let viewport = ui.ctx().viewport_id();
+        if viewport != egui::ViewportId::ROOT {
+            // a drag that starts in this window is invisible to the main window's Timeline, which
+            // follows it through this frame's pointer and release
+            panels::publish_window_drag(ui.ctx());
+        }
         self.app.auto.viewport = viewport;
         self.app.auto.add(&format!("panel.{}", panel.id()), rect, panel.title());
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("panel", panel.id())));
