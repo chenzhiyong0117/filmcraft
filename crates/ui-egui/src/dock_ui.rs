@@ -628,6 +628,9 @@ impl FilmcraftApp {
             // stretch the panel window to the size of the main window.
             let own = ctx.viewport_id() == panel_window_id(window.panel);
             if native && own {
+                // a drag that starts in this window is invisible to the main window's Timeline,
+                // which follows it through this frame's pointer and release
+                crate::panels::publish_window_drag(ctx);
                 closed = ctx.input(|i| i.viewport().close_requested());
                 placed = ctx.input(|i| {
                     let v = i.viewport();

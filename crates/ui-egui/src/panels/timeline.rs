@@ -3010,8 +3010,12 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
     });
 
     // ---- drops: project items and effects
+    // A drag can start in a panel that lives in another native window: this one never sees that
+    // window's pointer events, so the window that does publishes them in screen points.
+    let cross_pointer = crate::panels::window_drag_pointer(&ctx);
+    let cross_released = crate::panels::window_drag_released(&ctx);
     if let Some(item) = crate::panels::dragged_project_item(ui)
-        && let Some(p) = ctx.pointer_hover_pos()
+        && let Some(p) = cross_pointer.or_else(|| ctx.pointer_hover_pos())
         && layout.content.contains(p)
         && app.timeline_drop_target(ui.ctx(), p)
     {
@@ -3053,7 +3057,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             (None, Some((TrackKind::Audio, _))) => Some((seq.video_tracks.get(seq.audio_tracks.len()).map_or(json!("new"), |t| json!(t.id.0)), json!("new"))),
             (None, None) => None,
         };
-        if ctx.input(|i| i.pointer.any_released())
+        if (ctx.input(|i| i.pointer.any_released()) || cross_released)
             && let Some((vt, at)) = target
         {
             // dragging one of several selected project items places them all, back to back, as one edit
@@ -3080,7 +3084,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
     }
     // graphics templates from Essential Graphics ▸ Browse: placed on the video track under the pointer
     if let Some(template) = crate::panels::dragged_template(ui)
-        && let Some(p) = ctx.pointer_hover_pos()
+        && let Some(p) = cross_pointer.or_else(|| ctx.pointer_hover_pos())
         && layout.content.contains(p)
         && app.timeline_drop_target(ui.ctx(), p)
     {
@@ -3091,7 +3095,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             let r = Rect::from_min_max(pos2(layout.x_of(t), row.rect.min.y + 1.0), pos2(layout.x_of(t) + 60.0, row.rect.max.y - 1.0));
             ui.painter().rect_stroke(r, 3.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Inside);
         }
-        if ctx.input(|i| i.pointer.any_released()) {
+        if ctx.input(|i| i.pointer.any_released()) || cross_released {
             let mut q = json!({"template": template, "time": t.0});
             if let Some(row) = row {
                 q["track"] = json!(row.index);
@@ -3103,7 +3107,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
         }
     }
     if let Some(effect) = crate::panels::dragged_effect(ui)
-        && let Some(p) = ctx.pointer_hover_pos()
+        && let Some(p) = cross_pointer.or_else(|| ctx.pointer_hover_pos())
         && layout.content.contains(p)
         && app.timeline_drop_target(ui.ctx(), p)
         && let Hit::Clip { clip, .. } = hit(seq, layout, p)
@@ -3140,7 +3144,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 let r = Rect::from_min_max(pos2(layout.x_of(it.start), row.rect.min.y), pos2(layout.x_of(it.end()), row.rect.max.y));
                 ui.painter().rect_stroke(r, 3.0, Stroke::new(2.0, app.tokens.accent), StrokeKind::Inside);
             }
-            if ctx.input(|i| i.pointer.any_released()) {
+            if ctx.input(|i| i.pointer.any_released()) || cross_released {
                 let r = if let Some(name) = effect.strip_prefix("preset:") {
                     app.session.execute("presets.apply", json!({"preset": name, "clips": [clip.0]}))
                 } else if let Some(name) = effect.strip_prefix(crate::panels::LUMETRI_PRESET_PREFIX) {
@@ -3158,6 +3162,11 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 crate::panels::clear_drag(ui);
             }
         }
+    }
+    // A drag from another native window ended: its payload is the other window's to clear, but the
+    // pointer this window followed is done with.
+    if cross_released {
+        crate::panels::clear_window_drag(ui.ctx());
     }
     // ---- OS file drops imported with "drop imports to the timeline": placed at the drop point, one after another
     if let Some((items, p)) = app.pending_timeline_drop.clone()
