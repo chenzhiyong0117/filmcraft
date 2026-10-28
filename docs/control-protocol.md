@@ -179,6 +179,9 @@ Time is in ticks (254 016 000 000 per second); commands also accept `seconds`, `
 | `window.floatPanel` | `{panel?, rect?: [x,y,width,height]}` | Move an existing panel into a floating group. Omitted panel uses the focused panel; omitted rect uses a centered 420×320 group. |
 | `window.dockPanel` | `{panel?, anchor?, zone?: "center"\|"left"\|"right"\|"top"\|"bottom", before?}` | Move into the anchor's tab group or a side split; `before` names an existing destination tab for precise ordering. Floating destinations accept tabs only. Without `anchor`, a side `zone` docks the panel along that edge of the whole workspace, at a quarter of its width or height. |
 | `window.closePanel` | `{panel?}` | Close a docked or floating panel without closing its project documents. |
+| `window.panelWindow` | `{panel?, window?: bool}` | Show the floating group holding the panel in its own native window (on any display), or bring it back into the main window. Returns `{panel, window}`. |
+| `window.mergePanelWindow` | `{panel?, into, window?: bool}` | Move the panel into the floating group holding `into` as a tab, so both share one native window where the destination window was. `window: false` keeps the merged group in the main window; omitted keeps a desktop window when either group had one. Returns `{panel, into}`. |
+| `window.splitPanelWindow` | `{panel?, rect?: [x,y,width,height]}` | Pull the panel out of the floating group it shares into a native window of its own; the rest of the group keeps its window. Returns `{panel, window}`. |
 
 Invalid source/target identities and non-finite or out-of-range geometry return an error with
 the layout unchanged. `ui.inspect.ui.floating` reports floating groups and their logical-point

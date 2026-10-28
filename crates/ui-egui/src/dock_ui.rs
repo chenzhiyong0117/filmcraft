@@ -58,6 +58,35 @@ pub(crate) fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, param
             Ok(json!({"panel": panel.id(), "window": open}))
         })());
     }
+    if id == "window.mergePanelWindow" {
+        return Some((|| {
+            let panel = match params.get("panel") {
+                None => app.ui.focused,
+                Some(value) => value.as_str().and_then(PanelKind::from_name).ok_or("unknown panel")?,
+            };
+            let into = params.get("into").and_then(Value::as_str).and_then(PanelKind::from_name).ok_or("into must name a floating panel")?;
+            let window = match params.get("window") {
+                None => None,
+                Some(value) => Some(value.as_bool().ok_or("window must be a boolean")?),
+            };
+            app.merge_panel_window(ctx, panel, into, window)?;
+            Ok(json!({"panel": panel.id(), "into": into.id()}))
+        })());
+    }
+    if id == "window.splitPanelWindow" {
+        return Some((|| {
+            let panel = match params.get("panel") {
+                None => app.ui.focused,
+                Some(value) => value.as_str().and_then(PanelKind::from_name).ok_or("unknown panel")?,
+            };
+            let rect = match params.get("rect") {
+                None => None,
+                Some(value) => Some(serde_json::from_value::<[f32; 4]>(value.clone()).map_err(|_| "rect must contain four finite numbers")?),
+            };
+            let window = app.split_panel_window(ctx, panel, rect)?;
+            Ok(json!({"panel": panel.id(), "window": window}))
+        })());
+    }
     if !matches!(id, "window.dockPanel" | "window.floatPanel" | "window.closePanel") {
         return None;
     }
@@ -201,6 +230,155 @@ impl FilmcraftApp {
         if self.ui.keys.maximized == Some(p) {
             self.ui.keys.maximized = None;
         }
+        Ok(true)
+    }
+
+    /// The floating group holding pane `p`, if any.
+    fn floating_group_index(&self, p: PanelKind) -> Option<usize> {
+        self.ui.floating.iter().position(|group| group.panels.contains(&p))
+    }
+
+    /// The other floating groups `p` can move into as a tab: the panel naming each destination
+    /// window and the window's label, which is the name of the panels it shows.
+    pub fn merge_targets(&self, p: PanelKind) -> Vec<(PanelKind, String)> {
+        let own = self.floating_group_index(p);
+        self.ui
+            .floating
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != own)
+            .filter_map(|(_, group)| {
+                let into = group.panels.get(group.active).or_else(|| group.panels.first())?;
+                let names = group.panels.iter().map(|panel| crate::i18n::t(panel.title())).collect::<Vec<_>>().join(" · ");
+                Some((*into, names))
+            })
+            .collect()
+    }
+
+    /// Whether `p` shares its floating group with other tabs, so it can leave for a window of its
+    /// own ([`Self::split_panel_window`]).
+    pub fn can_split_panel_window(&self, p: PanelKind) -> bool {
+        self.floating_group_index(p).is_some_and(|index| self.ui.floating.get(index).is_some_and(|group| group.panels.len() > 1))
+    }
+
+    /// Move panel `p` into the floating group that holds `into` as a tab, so the two panels share
+    /// one native window — the way two windows dragged onto a second display become one window
+    /// with a tab strip. The merged window keeps the destination's place and size; `p`'s window
+    /// is gone. With `window` false the merged group floats in the main window instead, with true
+    /// it stays on the desktop; `None` keeps a desktop window when either panel had one. A docked
+    /// `p` leaves the main window first.
+    pub fn merge_panel_window(&mut self, ctx: &egui::Context, p: PanelKind, into: PanelKind, window: Option<bool>) -> Result<(), String> {
+        if p == into {
+            return Err(format!("{} is already there", p.title()));
+        }
+        if self.floating_group_index(p).is_none() {
+            if !self.ui.dock.contains(p) {
+                return Err(format!("{} is not open", p.title()));
+            }
+            let rect = default_float_rect(ctx.input_for(egui::ViewportId::ROOT, |i| i.content_rect()));
+            self.apply_dock(Action::Float { panel: p, rect })?;
+        }
+        let Some(target_index) = self.floating_group_index(into) else {
+            return Err(format!("{} is not a floating panel", into.title()));
+        };
+        let target = self.ui.floating[target_index].clone();
+        let Some(anchor) = target.panels.get(target.active).or_else(|| target.panels.first()).copied() else {
+            return Err(format!("{} has no floating group", into.title()));
+        };
+        if self.floating_group_index(p) == Some(target_index) {
+            // already one tab strip: only the window can change
+            if window == Some(false) {
+                let panels = target.panels.clone();
+                self.ui.panel_windows.retain(|w| !panels.contains(&w.panel));
+            }
+            return Ok(());
+        }
+        let origin = ctx.input_for(egui::ViewportId::ROOT, |i| i.viewport().inner_rect.map(|r| r.min)).unwrap_or(pos2(0.0, 0.0));
+        let place = match window {
+            Some(false) => None,
+            _ => {
+                let target_window = self.panel_window_of(&target.panels);
+                let source_window =
+                    self.floating_group_index(p).and_then(|index| self.ui.floating.get(index)).and_then(|group| self.panel_window_of(&group.panels));
+                match (target_window.or(source_window), window) {
+                    (Some(shown), _) => Some(shown.rect),
+                    // a window was asked for where neither group had one: put it over the destination
+                    (None, Some(true)) => Some(PanelWindow::sanitized([origin.x + target.rect[0], origin.y + target.rect[1], target.rect[2], target.rect[3]])),
+                    (None, Some(_) | None) => None,
+                }
+            }
+        };
+        self.apply_dock(Action::Move { panel: p, anchor, placement: Placement::Tab { before: None } })?;
+        let Some(merged) = self.ui.floating.iter().find(|group| group.panels.contains(&p) && group.panels.contains(&into)).cloned() else {
+            return Err("the panels did not end up in one floating group".into());
+        };
+        // one window carries one floating group: the destination keeps its window, renamed to the
+        // tab that is now active, and the window `p` came from is gone
+        let mut windows: Vec<PanelWindow> = self.ui.panel_windows.iter().copied().filter(|w| !merged.panels.contains(&w.panel)).collect();
+        if let Some(rect) = place {
+            windows.push(PanelWindow { panel: p, rect: PanelWindow::sanitized(rect) });
+        }
+        crate::dock::Layout { root: self.ui.dock.clone(), floating: self.ui.floating.clone(), panel_windows: windows.clone() }.validate()?;
+        self.ui.panel_windows = windows;
+        ctx.data_mut(|data| data.remove::<[f32; 4]>(panel_window_spawn_id(p)));
+        if let Some(rect) = place {
+            let rect = PanelWindow::sanitized(rect);
+            // the new window opens where the destination window was, not on the main display.
+            // `p`'s own window keeps its viewport id, so the window system still has it: move and
+            // resize it to the destination's place rather than opening a second window beside it.
+            ctx.data_mut(|data| data.insert_temp(panel_window_spawn_id(p), rect));
+            let id = panel_window_id(p);
+            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::OuterPosition(pos2(rect[0], rect[1])));
+            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::InnerSize(vec2(rect[2], rect[3])));
+        }
+        self.ui.focused = p;
+        Ok(())
+    }
+
+    /// Pull panel `p` out of the floating group it shares with other tabs into a native window of
+    /// its own; the rest of the group stays where it was. `rect` is the new window's place on the
+    /// desktop; without it the window opens beside the group's window, or over the group's place
+    /// in the main window. Returns whether `p` is in a window of its own.
+    pub fn split_panel_window(&mut self, ctx: &egui::Context, p: PanelKind, rect: Option<[f32; 4]>) -> Result<bool, String> {
+        let Some(index) = self.floating_group_index(p) else {
+            // a docked panel leaves the main window directly
+            return self.set_panel_window(ctx, p, Some(true));
+        };
+        let group = self.ui.floating[index].clone();
+        if group.panels.len() <= 1 {
+            return self.set_panel_window(ctx, p, Some(true));
+        }
+        let origin = ctx.input_for(egui::ViewportId::ROOT, |i| i.viewport().inner_rect.map(|r| r.min)).unwrap_or(pos2(0.0, 0.0));
+        let global = match rect {
+            Some(rect) => PanelWindow::sanitized(rect),
+            None => match self.panel_window_of(&group.panels) {
+                // beside the group's window, visible rather than hidden under it
+                Some(window) => PanelWindow::sanitized([window.rect[0] + 28.0, window.rect[1] + 28.0, window.rect[2], window.rect[3]]),
+                // over the panel's place in the main window
+                None => PanelWindow::sanitized([origin.x + group.rect[0], origin.y + group.rect[1], group.rect[2], group.rect[3]]),
+            },
+        };
+        let rest = group.panels.iter().copied().find(|panel| *panel != p);
+        let windowed = self.panel_window_of(&group.panels);
+        self.apply_dock(Action::Float { panel: p, rect: group.rect })?;
+        // the part of the group that stays keeps its window; the window was named after the tab
+        // that left, so it follows a panel that is still in the group
+        if let (Some(anchor), Some(window)) = (rest, windowed)
+            && window.panel == p
+        {
+            if let Some(w) = self.ui.panel_windows.iter_mut().find(|w| w.panel == p) {
+                w.panel = anchor;
+            }
+            ctx.data_mut(|data| data.remove::<[f32; 4]>(panel_window_spawn_id(p)));
+            ctx.data_mut(|data| data.insert_temp(panel_window_spawn_id(anchor), window.rect));
+        }
+        self.detach_panel(ctx, p, global)?;
+        // `p`'s own viewport id named the merged window and survives the split: send it to its own
+        // place instead of leaving it under the window the rest of the group keeps
+        let id = panel_window_id(p);
+        ctx.send_viewport_cmd_to(id, egui::ViewportCommand::OuterPosition(pos2(global[0], global[1])));
+        ctx.send_viewport_cmd_to(id, egui::ViewportCommand::InnerSize(vec2(global[2], global[3])));
+        self.ui.focused = p;
         Ok(true)
     }
 
