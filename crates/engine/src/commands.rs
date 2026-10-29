@@ -407,6 +407,30 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let ins = bool_p(p, "insert").unwrap_or(false);
     let copy = bool_p(p, "copy").unwrap_or(false);
+    // A mixed clip + caption selection drags together: the captions keep their own tracks but
+    // must land at the same time offset, in the same transaction (one undo step).
+    let mut captions: Vec<ClipId> =
+        p.get("captions").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect()).unwrap_or_default();
+    captions.dedup();
+    let caption_delta = Tick(p.get("captionDelta").and_then(Value::as_i64).unwrap_or(0));
+    // an Option-drag copies the clips; a caption cannot be copied onto itself on its track, so the
+    // captions stay put (they keep their selection)
+    if copy {
+        captions.clear();
+    }
+    let caption_need = captions.iter().filter_map(|c| s.active_sequence().and_then(|q| q.find_caption(*c)).map(|(_, c)| c.start.0)).min();
+    // the captions must stay at or after zero too: the whole group shifts as far as the most
+    // constrained member needs
+    let late = late.max(caption_need.map_or(0, |start| -(i128::from(start) + i128::from(caption_delta.0)))).max(0);
+    let caption_shift = if captions.is_empty() {
+        Tick::ZERO
+    } else {
+        i64::try_from(i128::from(caption_delta.0) + late)
+            .map(Tick)
+            .ok()
+            .filter(|t| *t <= Tick::MAX)
+            .ok_or_else(|| bad(CMD, "`captionDelta` is out of range"))?
+    };
     // every clip on the sequence now: id -> (track, start, end, project item)
     let spots = |s: &Session| -> Vec<(u64, TrackId, Tick, Tick, ItemId)> {
         let q = s.active_sequence();
@@ -454,7 +478,11 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         s.edit_sequence(if ins { "Move (Insert)" } else { "Move" }, |q, ctx, _| {
             let destinations = prepare(q, ctx)?;
-            Ok(edit::move_items(q, &destinations, ins, ctx)?)
+            edit::move_items(q, &destinations, ins, ctx)?;
+            if !captions.is_empty() && caption_shift != Tick::ZERO {
+                edit::captions::move_captions(q, &captions, caption_shift)?;
+            }
+            Ok(())
         })?;
         Vec::new()
     };
@@ -478,7 +506,12 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
     if copy {
         return Ok(json!({"copied": copied.iter().map(|c| c.0).collect::<Vec<_>>(), "overwritten": overwritten}));
     }
-    Ok(json!({"moved": moves.iter().map(|m| m.0.0).collect::<Vec<_>>(), "overwritten": overwritten}))
+    Ok(json!({
+        "moved": moves.iter().map(|m| m.0.0).collect::<Vec<_>>(),
+        "overwritten": overwritten,
+        "captions": captions.iter().map(|c| c.0).collect::<Vec<_>>(),
+        "captionDelta": if captions.is_empty() { 0 } else { caption_shift.0 },
+    }))
 }
 
 /// Slip clips together: the media delta of each clip is scaled down by the same factor so that the
@@ -2797,46 +2830,83 @@ fn build() -> Vec<CommandSpec> {
                 None => place_one(s, p),
             }
         ),
-        cmd!("timeline.select", "Select Clips", [], None, r#"{"clips":[id],"transitions":[id]?,"add":bool,"toggle":bool,"linked":bool?}"#, has_seq, |s, p| {
-            if let Some(ids) = p.get("transitions") {
-                return select_transitions(s, ids, bool_p(p, "add").unwrap_or(false), bool_p(p, "toggle").unwrap_or(false));
-            }
-            let clips: Vec<ClipId> =
-                p.get("clips").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect()).unwrap_or_default();
-            let clips = if bool_p(p, "linked").unwrap_or(true) { with_links(s, &clips) } else { clips };
-            // selecting clips leaves trim mode (Premiere: clip and edit point selections are exclusive)
-            s.state.edit_points.clear();
-            s.state.trim_shift = Default::default();
-            // and a clip selection replaces a transition or gap one
-            s.state.transition_selection.clear();
-            s.state.gap_selection = None;
-            if bool_p(p, "toggle").unwrap_or(false) {
-                for c in clips {
-                    if let Some(i) = s.state.selection.iter().position(|x| *x == c) {
-                        s.state.selection.remove(i);
+        cmd!(
+            "timeline.select",
+            "Select Clips",
+            [],
+            None,
+            r#"{"clips":[id],"captions":[id]?,"transitions":[id]?,"add":bool,"toggle":bool,"linked":bool?}"#,
+            has_seq,
+            |s, p| {
+                if let Some(ids) = p.get("transitions") {
+                    return select_transitions(s, ids, bool_p(p, "add").unwrap_or(false), bool_p(p, "toggle").unwrap_or(false));
+                }
+                let clips: Vec<ClipId> =
+                    p.get("clips").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect()).unwrap_or_default();
+                let clips = if bool_p(p, "linked").unwrap_or(true) { with_links(s, &clips) } else { clips };
+                // captions ride along in the same command, so a marquee that crosses clip and caption
+                // tracks is one selection change
+                let captions: Option<Vec<ClipId>> =
+                    p.get("captions").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect());
+                // selecting clips leaves trim mode (Premiere: clip and edit point selections are exclusive)
+                s.state.edit_points.clear();
+                s.state.trim_shift = Default::default();
+                // and a clip selection replaces a transition or gap one
+                s.state.transition_selection.clear();
+                s.state.gap_selection = None;
+                if bool_p(p, "toggle").unwrap_or(false) {
+                    for c in clips {
+                        if let Some(i) = s.state.selection.iter().position(|x| *x == c) {
+                            s.state.selection.remove(i);
+                        } else {
+                            s.state.selection.push(c);
+                        }
+                    }
+                } else if bool_p(p, "add").unwrap_or(false) {
+                    for c in clips {
+                        if !s.state.selection.contains(&c) {
+                            s.state.selection.push(c);
+                        }
+                    }
+                } else {
+                    s.state.selection = clips;
+                    if captions.is_none() {
+                        s.state.caption_selection.clear();
+                    }
+                }
+                if let Some(captions) = captions {
+                    if bool_p(p, "toggle").unwrap_or(false) {
+                        for c in captions {
+                            match s.state.caption_selection.iter().position(|x| *x == c) {
+                                Some(i) => {
+                                    s.state.caption_selection.remove(i);
+                                }
+                                None => s.state.caption_selection.push(c),
+                            }
+                        }
+                    } else if bool_p(p, "add").unwrap_or(false) {
+                        for c in captions {
+                            if !s.state.caption_selection.contains(&c) {
+                                s.state.caption_selection.push(c);
+                            }
+                        }
                     } else {
-                        s.state.selection.push(c);
+                        s.state.caption_selection = captions;
                     }
                 }
-            } else if bool_p(p, "add").unwrap_or(false) {
-                for c in clips {
-                    if !s.state.selection.contains(&c) {
-                        s.state.selection.push(c);
-                    }
-                }
-            } else {
-                s.state.selection = clips;
-                s.state.caption_selection.clear();
+                Ok(json!({
+                    "selection": s.state.selection.iter().map(|c| c.0).collect::<Vec<_>>(),
+                    "captions": s.state.caption_selection.iter().map(|c| c.0).collect::<Vec<_>>(),
+                }))
             }
-            Ok(json!({"selection": s.state.selection.iter().map(|c| c.0).collect::<Vec<_>>()}))
-        }),
+        ),
         cmd!("timeline.selectGap", "Select Gap", [], None, r#"{"track":"V1"|id,"time":ticks|"frame":n|"seconds":f}"#, has_seq, select_gap),
         cmd!(
             "timeline.move",
             "Move Clips",
             [],
             None,
-            r#"{"moves":[{"clip":id,"track":id|"V2"|"new" (after the last of its kind),"time":ticks}],"insert":bool,"linked":bool?,"copy":bool?}"#,
+            r#"{"moves":[{"clip":id,"track":id|"V2"|"new" (after the last of its kind),"time":ticks}],"insert":bool,"linked":bool?,"copy":bool?,"captions":[id]?,"captionDelta":ticks?}"#,
             has_seq,
             move_clips
         ),

@@ -726,3 +726,92 @@ fn new_track_moves_respect_the_track_limit() {
     assert_eq!(*s.project, *before);
     assert_eq!(s.execute("history.list", json!({})).unwrap(), history);
 }
+
+/// A marquee can select clips and captions together: they move by the same offset, and the whole
+/// group is one undo step (the linked sound of the picture comes along).
+#[test]
+fn a_clip_and_caption_selection_moves_together_in_one_undo_step() {
+    let mut s = demo();
+    let rate = s.sequence_rate();
+    let (_, v, a_track, a) = last_pair(&s);
+    let cap = s.execute("captions.add", json!({"frame": 12, "text": "Together"})).unwrap()["caption"].as_u64().unwrap();
+    let cap_id = ClipId(cap);
+    let cap_start = s.active_sequence().unwrap().find_caption(cap_id).map(|(_, c)| c.start).unwrap();
+    s.execute("timeline.select", json!({"clips": [v.id.0], "captions": [cap]})).unwrap();
+    assert_eq!(s.state.caption_selection, vec![cap_id], "one command selects clips and captions");
+    let before = (*s.project).clone();
+    let d = rate.tick_of(24);
+    let r = s
+        .execute("timeline.move", json!({"moves": [{"clip": v.id.0, "track": "V1", "time": (v.start + d).0}], "captions": [cap], "captionDelta": d.0}))
+        .unwrap();
+    assert_eq!(r["captionDelta"], json!(d.0));
+    assert_eq!(state(&s, v.id).1, v.start + d);
+    assert_eq!(state(&s, a.id).1, a.start + d, "the linked sound stays in sync");
+    assert_eq!(s.active_sequence().unwrap().find_caption(cap_id).map(|(_, c)| c.start), Some(cap_start + d));
+    assert_eq!(state(&s, a.id).0, a_track);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(*s.project, before, "one undo step puts the clips and the caption back");
+    // the group also stops together at zero: a caption at the start limits a leftward move
+    let cap_zero = s.execute("captions.add", json!({"frame": 0, "text": "Start"})).unwrap()["caption"].as_u64().unwrap();
+    let first = s.active_sequence().unwrap().video_tracks[0].items.first().map(|i| i.id).unwrap();
+    let start = state(&s, first).1;
+    let r = s
+        .execute("timeline.move", json!({"moves": [{"clip": first.0, "track": "V1", "time": (start - d).0}], "captions": [cap_zero], "captionDelta": -d.0}))
+        .unwrap();
+    assert_eq!(r["captionDelta"], json!(0), "the caption at zero pins the group");
+    assert_eq!(state(&s, first).1, start, "so the picture does not move either");
+}
+
+/// A marquee over two pictures and two captions: dragging +2 s moves all four, keeps their spacing,
+/// and is one undo step.
+#[test]
+fn two_pictures_and_two_captions_move_together_keeping_their_spacing() {
+    let mut s = demo();
+    let rate = s.sequence_rate();
+    s.execute("file.newSequence", json!({"name": "Mixed", "video": 2, "audio": 1})).unwrap();
+    let item = s.project.items.values().find(|i| i.has_video() && !i.has_audio() && i.as_media().is_some()).map(|i| i.id).unwrap();
+    let d48 = rate.tick_of(48);
+    let d12 = rate.tick_of(12).0 as f64 / filmcraft_time::TICKS_PER_SECOND as f64;
+    for frame in [0, 96] {
+        s.execute("timeline.place", json!({"item": item.0, "frame": frame, "duration": d48, "track": "V1"})).unwrap();
+    }
+    let caps: Vec<u64> = [0, 96]
+        .iter()
+        .map(|f| s.execute("captions.add", json!({"frame": f, "durationSeconds": d12, "text": format!("C{f}")})).unwrap()["caption"].as_u64().unwrap())
+        .collect();
+    let (v1, v2) = {
+        let q = s.active_sequence().unwrap();
+        let items = &q.video_tracks[0].items;
+        (items[0].clone(), items[1].clone())
+    };
+    let cap_starts: Vec<Tick> = caps.iter().map(|c| s.active_sequence().unwrap().find_caption(ClipId(*c)).map(|(_, c)| c.start).unwrap()).collect();
+    s.execute("timeline.select", json!({"clips": [v1.id.0, v2.id.0], "captions": caps, "linked": false})).unwrap();
+    assert_eq!(s.state.selection.len(), 2);
+    assert_eq!(s.state.caption_selection.len(), 2);
+    let before = (*s.project).clone();
+    let shift = rate.tick_of(48);
+    let r = s
+        .execute(
+            "timeline.move",
+            json!({
+                "moves": [{"clip": v1.id.0, "track": "V1", "time": (v1.start + shift).0}, {"clip": v2.id.0, "track": "V1", "time": (v2.start + shift).0}],
+                "captions": caps,
+                "captionDelta": shift.0,
+                "linked": false,
+            }),
+        )
+        .unwrap();
+    assert_eq!(r["captionDelta"], json!(shift.0));
+    assert_eq!(state(&s, v1.id).1, v1.start + shift);
+    assert_eq!(state(&s, v2.id).1, v2.start + shift);
+    for (cap, start) in caps.iter().zip(&cap_starts) {
+        assert_eq!(s.active_sequence().unwrap().find_caption(ClipId(*cap)).map(|(_, c)| c.start), Some(*start + shift));
+    }
+    let moved = s.active_sequence().unwrap();
+    assert_eq!(moved.video_tracks[0].items[1].start - moved.video_tracks[0].items[0].start, v2.start - v1.start, "spacing is kept");
+    let moved_caps: Vec<Tick> = caps.iter().map(|c| moved.find_caption(ClipId(*c)).map(|(_, c)| c.start).unwrap()).collect();
+    assert_eq!(moved_caps[1] - moved_caps[0], cap_starts[1] - cap_starts[0], "caption spacing is kept");
+    assert_eq!(moved.video_tracks[0].items[0].start - v1.start, moved_caps[0] - cap_starts[0], "captions moved by the same offset");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(*s.project, before, "one undo step restores both clips and both captions");
+}

@@ -20,6 +20,8 @@ pub struct Layout {
     pub scroll: f64,
     /// The y of the divider between the video tracks (above) and the audio tracks (below).
     pub split_y: f32,
+    /// The band the caption track rows take, above the video tracks (empty when there are none).
+    pub caption_area: Rect,
 }
 
 impl Layout {

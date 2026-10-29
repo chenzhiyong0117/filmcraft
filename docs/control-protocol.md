@@ -135,7 +135,9 @@ management commands and dialog ids: offline media and relinking (`media.findMiss
 proxies (`media.createProxies`, `media.attachProxies`, `media.toggleProxies`, `proxies.*`), ingest
 (`project.ingestSettings`) and the Project Manager (`file.projectManager`, `pm.*`).
 
-**Moving clips**: `timeline.move {moves: [{clip, track, time}], insert?, linked?}` → `{moved: [clip ids]}`.
+**Selecting clips and captions together**: `timeline.select {clips, captions?, add?, toggle?, linked?}` (the Timeline panel's box selection) writes `selection` and `caption_selection` in one command, so a box that crosses the caption rows and the tracks is one selection change; `linked` adds the linked partners of the clips.
+
+**Moving clips**: `timeline.move {moves: [{clip, track, time}], insert?, linked?, captions?, captionDelta?}` → `{moved: [clip ids], captions, captionDelta}`.
 With Linked Selection on (the default; `linked` overrides the toggle for one call) the linked
 partners of a listed clip that are not listed themselves move by the same time offset and stay on
 their own tracks, so picture and sound stay in sync. Like a listed clip, a partner overwrites
@@ -148,6 +150,10 @@ panel's drag passes `linked: false`, because it already lists exactly the clips 
 `copy: true` (Option-drag in the timeline) the clips stay where they are and copies land at the
 destinations instead (linked partners are copied too, unless `linked: false`); the result lists
 the new clips as `copied`, they are selected, and copies of linked clips are linked to each other.
+`captions` (with the `captions` selection a box made, `captionDelta` the drag's time offset) moves
+those captions by the same offset in the same transaction, one undo step for the whole selection;
+no caption goes before the sequence start either (the whole group lands later instead), and a copy
+leaves the captions where they are (`captionDelta` is reported as 0).
 
 **Selecting forward and backward**: `edit.selectForward` and `edit.selectBackward` (Edit menu, Cmd+Alt+Shift+Down / Cmd+Alt+Shift+Up) replace both selections, like `edit.selectAll`: Select Forward takes every clip on every track whose start is at or after the playhead and every caption that starts there or later; Select Backward takes the clips whose end is at or before the playhead and the captions that end there or earlier. Both accept an optional `time` (ticks) to work from a moment other than the playhead; the playhead does not move. Each returns `{clips, captions}`, the number selected. Like Select All these are selection changes, not edits: they clear the gap selection, and undo does not restore the previous selection. Clips on locked tracks are selected too.
 

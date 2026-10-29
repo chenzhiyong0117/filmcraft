@@ -249,6 +249,8 @@ pub enum Drag {
     Marquee {
         start: Pos2,
         before: Vec<ClipId>,
+        /// The caption selection when the drag began, restored on Escape and kept by Shift.
+        before_caps: Vec<ClipId>,
         add: bool,
         individual: bool,
     },
@@ -327,7 +329,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let rect = Rect::from_min_max(pos2(content.min.x, top), pos2(content.max.x, top + ah));
         rows.push(Row { track: tr.id, kind: TrackKind::Audio, index: i, rect, lane: app.ui.timeline.track_lanes.contains_key(&tr.id.0) });
     }
-    let layout = Layout { content, ruler, rows: rows.clone(), pps, scroll, split_y };
+    let layout = Layout { content, ruler, rows: rows.clone(), pps, scroll, split_y, caption_area };
     app.tl.layout = Some(layout.clone());
 
     // ---- backgrounds
@@ -1067,6 +1069,7 @@ mod new_track_tests {
             pps: 100.0,
             scroll: 0.0,
             split_y: 200.0,
+            caption_area: Rect::NOTHING,
         };
         let at = |y| new_track_at(&seq, &layout, y, 50.0, 50.0);
         assert_eq!(at(40.0), Some((TrackKind::Video, Rect::from_min_max(pos2(0.0, 100.0), pos2(800.0, 150.0)))));
@@ -1107,6 +1110,7 @@ mod new_track_tests {
             pps: 100.0,
             scroll: 0.0,
             split_y: 150.0,
+            caption_area: Rect::NOTHING,
         };
         assert_eq!(new_track_at(&seq, &layout, 10.0, 50.0, 50.0), Some((TrackKind::Video, Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 50.0)))));
         // scrolled to the bottom, V1..V3 fill the area as before
