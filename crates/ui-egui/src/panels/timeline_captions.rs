@@ -248,6 +248,7 @@ fn razor_block(
 
 /// Handle one caption block: 5 px trim edges (capped at a quarter width), hover cursor, selection and double-click, and drag state; locked tracks are
 /// read-only.
+#[allow(clippy::too_many_arguments)] // the app, the ui, the sequence, the track, the caption, its rect, the rate, and the actions
 fn interact_block(
     app: &mut FilmcraftApp,
     ui: &mut egui::Ui,

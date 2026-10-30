@@ -42,6 +42,7 @@ pub(in super::super) fn snap_playhead(app: &mut FilmcraftApp, seq: &Sequence, la
     snap_to(app, seq, layout, t, &[], false, None, mods)
 }
 
+#[allow(clippy::too_many_arguments)] // app, the view, the time, the exclusion, the playhead test, the sticky side, the keys
 fn snap_to(
     app: &mut FilmcraftApp,
     seq: &Sequence,
