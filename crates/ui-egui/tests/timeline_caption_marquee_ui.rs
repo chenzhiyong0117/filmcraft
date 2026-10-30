@@ -65,11 +65,6 @@ impl Driver {
         egui::Rect::from_min_size(egui::pos2(r[0] as f32, r[1] as f32), egui::vec2(r[2] as f32, r[3] as f32))
     }
 
-    /// Pointer x travel for `frames` frames of timeline time at the test's fixed zoom.
-    fn px(&self, frames: i64) -> f32 {
-        (frames as f64 * self.frame_s * PPS) as f32
-    }
-
     fn send(&mut self, e: egui::Event) {
         self.harness.input_mut().events.push(e);
         self.frames(1);
@@ -83,14 +78,6 @@ impl Driver {
         for k in 1..=8 {
             self.send(egui::Event::PointerMoved(from.lerp(to, k as f32 / 8.0)));
         }
-    }
-
-    fn start_of(&self, clip: ClipId) -> i64 {
-        self.harness.state().session.active_sequence().and_then(|q| q.find_item(clip)).map(|(_, i)| i.start.0).unwrap_or(-1)
-    }
-
-    fn caption_start(&self, cap: ClipId) -> i64 {
-        self.harness.state().session.active_sequence().and_then(|q| q.find_caption(cap)).map(|(_, c)| c.start.0).unwrap_or(-1)
     }
 
     fn tick_of(&self, frames: i64) -> i64 {
