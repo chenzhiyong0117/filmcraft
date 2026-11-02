@@ -563,3 +563,53 @@ fn presets_bin_drag_and_save_dialog() {
     assert_eq!(mine["masks"], 1);
     d.rect("effects.preset.My Vignette");
 }
+
+/// The box tool (#box-mask): pick it on an effect, drag a rectangle over the picture, and a
+/// four-corner mask whose vertices sit on the drag's corners appears — cropping the picture to the
+/// box in one gesture, where the pen needs four clicks.
+#[test]
+fn box_tool_draws_a_rectangle_mask_in_one_drag() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Effects"}));
+    let seq = d.exec("sequence.inspect", json!({}));
+    let clip = &seq["video"][0]["items"][0];
+    let (id, start, dur) = (clip["clip"].as_u64().unwrap(), clip["start"].as_i64().unwrap(), clip["duration"].as_i64().unwrap());
+    d.exec("playhead.set", json!({"time": start + dur / 2}));
+    d.exec("timeline.select", json!({"clips": [id]}));
+    d.exec("effects.apply", json!({"effect": "gaussian_blur"}));
+    d.frames(4);
+    for fx in ["motion", "time_remap"] {
+        d.ok("ui.click", json!({"id": format!("effectControls.effect.{fx}.twirl")}));
+        d.frames(2);
+    }
+    let before = d.masks().len();
+    d.ok("ui.click", json!({"id": "effectControls.gaussian_blur.mask.box"}));
+    d.frames(2);
+    // armed: the monitor takes the drag, and no mask exists yet
+    assert!(d.has("program.maskBox"), "the box tool armed on the Program monitor");
+    assert_eq!(d.masks().len(), before);
+    let pic = d.rect("program.picture");
+    let from = (pic[0] + pic[2] * 0.35, pic[1] + pic[3] * 0.30);
+    let to = (pic[0] + pic[2] * 0.65, pic[1] + pic[3] * 0.70);
+    d.ok("ui.drag", json!({"from": {"x": from.0, "y": from.1}, "to": {"x": to.0, "y": to.1}, "steps": 6}));
+    d.frames(3);
+    let m = d.masks();
+    assert_eq!(m.len(), before + 1, "one mask created: {m:?}");
+    let mask = m.iter().find(|x| x["effectId"] == "gaussian_blur").expect("the blur's mask");
+    assert_eq!(mask["path"]["vertices"].as_array().unwrap().len(), 4, "a 4-point rectangle: {mask}");
+    assert_eq!(mask["selected"], true);
+    assert!(!d.has("program.maskBox"), "the tool disarms once the box is drawn");
+    // its corners are where the drag's corners were: the mask is exactly the dragged box
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    for i in 0..4 {
+        let r = d.rect(&format!("program.mask.vertex.{i}"));
+        xs.push(r[0] + r[2] / 2.0);
+        ys.push(r[1] + r[3] / 2.0);
+    }
+    let (x0, x1) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
+    let (y0, y1) = (ys.iter().cloned().fold(f64::MAX, f64::min), ys.iter().cloned().fold(f64::MIN, f64::max));
+    assert!((x0 - from.0).abs() < 3.0 && (x1 - to.0).abs() < 3.0, "x range {x0}..{x1} vs {from:?}..{to:?}");
+    assert!((y0 - from.1).abs() < 3.0 && (y1 - to.1).abs() < 3.0, "y range {y0}..{y1} vs {from:?}..{to:?}");
+    d.shot("mask-box-drawn");
+}

@@ -966,6 +966,8 @@
 	Create ellipse mask	Crear máscara de elipse
 	Create 4-point polygon mask	Crear máscara de polígono de 4 puntos
 	Free draw bezier	Bézier a mano alzada
+	Drag a rectangle over the picture to crop to it	Arrastra un rectángulo sobre la imagen para recortarla
+	Drag a rectangle in the Program monitor to keep just that area; Esc cancels	Arrastra un rectángulo en el monitor de programa para conservar solo esa zona; Esc cancela
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	Haz clic en el monitor de programa para colocar puntos de máscara (arrastra para curvas); haz clic en el primer punto o pulsa Intro para cerrar
 	Delete Mask	Eliminar máscara
 	Inverted	Invertida

@@ -4,11 +4,11 @@
 //! expansion and corner-roundness handles; a marquee or Shift-click selects several vertices,
 //! which move together; the pen places a free-draw Bézier mask).
 //!
-//! Automation ids: `effectControls.<effect>.mask.{ellipse,polygon,pen}`,
+//! Automation ids: `effectControls.<effect>.mask.{ellipse,polygon,pen,box}`,
 //! `effectControls.<effect>.mask<k>` (+ `.mode`, `.inverted`, `.delete`, and the parameter rows
 //! `effectControls.<effect>.mask<k>.<param>.*`), `program.mask.vertex.<i>`, `program.mask.in.<i>`,
 //! `program.mask.out.<i>`, `program.mask.body`, `program.mask.feather`, `program.mask.expansion`,
-//! `program.mask.roundness`, `program.mask.marquee`, `program.maskPen`.
+//! `program.mask.roundness`, `program.mask.marquee`, `program.maskPen`, `program.maskBox`.
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
 use filmcraft_geom::{Affine, Vec2};
@@ -49,10 +49,12 @@ pub(crate) fn effect_rows(
     let (r, _) = ui.allocate_exact_size(vec2(body.width(), ROW_H), Sense::hover());
     crate::panels::effect_controls::row_line(ui, r, lane, &t);
     let pen_on = app.ui.mask_pen.as_ref().is_some_and(|p| p.clip == clip.0 && p.effect == idx);
+    let box_on = app.ui.mask_box.as_ref().is_some_and(|p| p.clip == clip.0 && p.effect == idx);
     for (i, (icon, kind, tip)) in [
         (Icon::Ellipse, "ellipse", tl!("Create ellipse mask")),
         (Icon::Rectangle, "polygon", tl!("Create 4-point polygon mask")),
         (Icon::Pen, "pen", tl!("Free draw bezier")),
+        (Icon::Marquee, "box", tl!("Drag a rectangle over the picture to crop to it")),
     ]
     .into_iter()
     .enumerate()
@@ -62,15 +64,22 @@ pub(crate) fn effect_rows(
         if resp.hovered() {
             ui.painter().rect_filled(br, 3.0, t.hover);
         }
-        let on = kind == "pen" && pen_on;
+        let on = (kind == "pen" && pen_on) || (kind == "box" && box_on);
         icons::paint(ui.painter(), br.shrink(3.0), icon, if on { t.accent } else { t.icon });
         app.auto.add(&format!("effectControls.{}.mask.{kind}", e.effect), br, tip);
         if resp.clicked() {
             if kind == "pen" {
                 app.ui.mask_pen = if on { None } else { Some(crate::state::MaskPenDraft { clip: clip.0, effect: idx, points: vec![] }) };
                 if !on {
+                    app.ui.mask_box = None;
                     app.ui.status =
                         tl!("Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close").into();
+                }
+            } else if kind == "box" {
+                app.ui.mask_box = if on { None } else { Some(crate::state::MaskBoxDraft { clip: clip.0, effect: idx }) };
+                if !on {
+                    app.ui.mask_pen = None;
+                    app.ui.status = tl!("Drag a rectangle in the Program monitor to keep just that area; Esc cancels").into();
                 }
             } else {
                 actions.push(("masks.add".into(), json!({"clip": clip.0, "effect": idx, "shape": kind})));
@@ -231,6 +240,10 @@ fn inside(pts: &[Vec2], p: Vec2) -> bool {
 /// Mask editing on the Program monitor (selected mask, while its clip is selected, as for the
 /// transform box) and the pen tool.
 pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, frame: (u32, u32)) {
+    if app.ui.mask_box.is_some() {
+        box_overlay(app, ui, pic, frame);
+        return;
+    }
     if app.ui.mask_pen.is_some() {
         pen_overlay(app, ui, pic, frame);
         return;
@@ -779,6 +792,110 @@ pub(crate) fn pen_take_back(app: &mut FilmcraftApp, ctx: &egui::Context, text_fo
     d.points.truncate(left);
     if left == 0 {
         app.ui.mask_pen = None;
+    }
+}
+
+/// The box tool: drag a rectangle over the picture to create a rectangular mask on the chosen
+/// effect (Effect Controls ▸ box icon). The draft is a drag, not a state machine: press, drag,
+/// release — the rubber band shows the crop, Esc cancels.
+fn box_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, frame: (u32, u32)) {
+    let Some(draft) = app.ui.mask_box.clone() else { return };
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.ui.mask_box = None;
+        app.ui.status.clear();
+        return;
+    }
+    let ph = app.session.playhead();
+    let clip = ClipId(draft.clip);
+    let Some(it) = app.session.active_sequence().and_then(|q| q.find_item(clip)).map(|(_, i)| i.clone()) else {
+        app.ui.mask_box = None;
+        return;
+    };
+    let mt = it.effect_time_at(ph.clamp(it.start, it.end() - Tick(1)));
+    let Some(to_screen) = clip_to_screen(app, &it, mt, pic, frame) else { return };
+    let Some(to_clip) = to_screen.inverse() else { return };
+    let col = Color32::from_rgb(0x5a, 0xb4, 0xff);
+    let resp = ui.interact(pic, egui::Id::unique("mask-box"), Sense::click_and_drag());
+    app.auto.add("program.maskBox", pic, "Box mask");
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+    let from_id = egui::Id::unique("mask-box-from");
+    let last_id = egui::Id::unique("mask-box-last");
+    let at = |p: Pos2| p.clamp(pic.min, pic.max);
+    // the press position, not the first dragged frame: the box starts where the button went down
+    if resp.drag_started_by(LEFT)
+        && let Some(p) = ui.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos()).map(at)
+    {
+        ui.data_mut(|d| d.insert_temp(from_id, p));
+        ui.data_mut(|d| d.insert_temp(last_id, p));
+    }
+    if resp.dragged_by(LEFT)
+        && let Some(p) = resp.interact_pointer_pos().map(at)
+    {
+        ui.data_mut(|d| d.insert_temp(last_id, p));
+    }
+    let from = ui.data(|d| d.get_temp::<Pos2>(from_id));
+    let last = ui.data(|d| d.get_temp::<Pos2>(last_id)).or(from);
+    let mut commit = None;
+    if resp.drag_stopped_by(LEFT) {
+        // the release position, so the box ends exactly where the button came up
+        let end = ui.input(|i| i.pointer.latest_pos()).map(at).or(last);
+        if let (Some(a), Some(b)) = (from, end) {
+            commit = Some((a, b));
+        }
+        ui.data_mut(|d| {
+            d.remove::<Pos2>(from_id);
+            d.remove::<Pos2>(last_id);
+        });
+    }
+    // preview: the crop rectangle, everything outside it dimmed, its size in clip pixels
+    if let (Some(a), Some(b)) = (from, last) {
+        let r = Rect::from_two_pos(a, b).intersect(pic);
+        let painter = ui.painter().with_clip_rect(pic);
+        let dim = Color32::from_black_alpha(110);
+        for q in [
+            Rect::from_min_max(pic.min, pos2(pic.max.x, r.min.y)),
+            Rect::from_min_max(pos2(pic.min.x, r.max.y), pic.max),
+            Rect::from_min_max(pos2(pic.min.x, r.min.y), pos2(r.min.x, r.max.y)),
+            Rect::from_min_max(pos2(r.max.x, r.min.y), pos2(pic.max.x, r.max.y)),
+        ] {
+            if q.width() > 0.0 && q.height() > 0.0 {
+                painter.rect_filled(q, 0.0, dim);
+            }
+        }
+        painter.rect_stroke(r, 0.0, Stroke::new(1.5, col), egui::StrokeKind::Middle);
+        let c = |p: Pos2| to_clip.apply(Vec2::new(p.x as f64, p.y as f64));
+        let (p0, p1) = (c(r.min), c(r.max));
+        let (w, h) = ((p1.x - p0.x).abs(), (p1.y - p0.y).abs());
+        painter.text(
+            r.left_top() + vec2(0.0, -6.0),
+            Align2::LEFT_BOTTOM,
+            format!("{} × {}", w.round() as i64, h.round() as i64),
+            egui::FontId::proportional(11.0),
+            Color32::WHITE,
+        );
+    }
+    if let Some((a, b)) = commit {
+        let r = Rect::from_two_pos(a, b);
+        // a stray click must not leave a zero-size mask behind
+        if r.width() < 4.0 || r.height() < 4.0 {
+            app.ui.status = tl!("Drag a rectangle in the Program monitor to keep just that area; Esc cancels").into();
+            return;
+        }
+        let c = |p: Pos2| to_clip.apply(Vec2::new(p.x as f64, p.y as f64));
+        let (p0, p1) = (c(r.min), c(r.max));
+        let path = MaskPath::rect(p0.x.min(p1.x), p0.y.min(p1.y), p0.x.max(p1.x), p0.y.max(p1.y));
+        app.ui.mask_box = None;
+        let out = app.session.execute(
+            "masks.add",
+            json!({"clip": draft.clip, "effect": draft.effect, "shape": "rectangle", "path": filmcraft_engine::masks::path_to_json(&path)}),
+        );
+        if let Err(e) = out {
+            app.ui.status = e.to_string();
+        } else {
+            app.ui.status.clear();
+        }
     }
 }
 

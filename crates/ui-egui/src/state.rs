@@ -592,6 +592,9 @@ pub struct UiState {
     /// Free-draw (pen) mask being placed on the Program monitor (Effect Controls ▸ pen icon).
     #[serde(default)]
     pub mask_pen: Option<MaskPenDraft>,
+    /// Box mask being dragged out on the Program monitor (Effect Controls ▸ box icon).
+    #[serde(default)]
+    pub mask_box: Option<MaskBoxDraft>,
     /// Effect presets: the preset being renamed / the Save Preset dialog (open when Some).
     #[serde(default)]
     pub save_preset: Option<SavePresetDraft>,
@@ -664,6 +667,14 @@ pub struct MaskPenDraft {
     pub clip: u64,
     pub effect: usize,
     pub points: Vec<[f64; 4]>,
+}
+
+/// A box (marquee) mask in progress: the effect it will be created on. The dragged rectangle
+/// lives in the drag itself (egui temp data), so nothing stale survives a reload.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MaskBoxDraft {
+    pub clip: u64,
+    pub effect: usize,
 }
 
 /// Save Preset dialog (Effect Controls ▸ right-click an effect ▸ Save Preset…).
@@ -1057,6 +1068,7 @@ impl Default for UiState {
             make_offline: None,
             color_dialog: None,
             mask_pen: None,
+            mask_box: None,
             save_preset: None,
             audio_fx_editors: Vec::new(),
             sync_dialog: None,

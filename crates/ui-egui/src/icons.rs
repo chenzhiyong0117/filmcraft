@@ -20,6 +20,8 @@ pub enum Icon {
     Pen,
     Rectangle,
     Ellipse,
+    /// A box (marquee) selection: the mask tool that drags out a rectangle.
+    Marquee,
     Hand,
     Zoom,
     Type,
@@ -313,6 +315,22 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Rectangle => pen.rect(2.5, 4.0, 13.5, 12.0),
         Ellipse => pen.circle(8.0, 8.0, 5.5),
+        Marquee => {
+            for (a, b) in [
+                ((2.5, 3.0), (5.0, 3.0)),
+                ((7.0, 3.0), (9.5, 3.0)),
+                ((11.5, 3.0), (13.5, 3.0)),
+                ((2.5, 13.0), (5.0, 13.0)),
+                ((7.0, 13.0), (9.5, 13.0)),
+                ((11.5, 13.0), (13.5, 13.0)),
+                ((2.5, 5.0), (2.5, 7.0)),
+                ((2.5, 9.0), (2.5, 11.0)),
+                ((13.5, 5.0), (13.5, 7.0)),
+                ((13.5, 9.0), (13.5, 11.0)),
+            ] {
+                pen.line(&[a, b]);
+            }
+        }
         Hand => {
             pen.line(&[(5.0, 8.5), (5.0, 4.0), (6.5, 3.2), (7.3, 4.0), (7.3, 7.5)]);
             pen.line(&[(7.3, 4.0), (7.3, 2.8), (8.8, 2.2), (9.6, 3.0), (9.6, 7.5)]);
@@ -842,6 +860,7 @@ mod tests {
         Pen,
         Rectangle,
         Ellipse,
+        Marquee,
         Hand,
         Zoom,
         Type,
