@@ -761,7 +761,9 @@ fn a_clip_and_caption_selection_moves_together_in_one_undo_step() {
     let r = s
         .execute("timeline.move", json!({"moves": [{"clip": first.0, "track": "V1", "time": (start - d).0}], "captions": [cap_zero], "captionDelta": -d.0}))
         .unwrap();
-    assert_eq!(r["captionDelta"], json!(0), "the caption at zero pins the group");
+    // the group is pinned: no caption moved, so the reply does not list one
+    assert!(r.get("captions").is_none());
+    assert_eq!(r.get("captionDelta").and_then(|v| v.as_i64()).unwrap_or(0), 0, "the caption at zero pins the group");
     assert_eq!(state(&s, first).1, start, "so the picture does not move either");
 }
 

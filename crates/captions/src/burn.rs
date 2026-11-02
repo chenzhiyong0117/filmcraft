@@ -545,13 +545,16 @@ mod tests {
         let (line_override, align_override) = vtt_overrides(&c.settings);
         let align = align_override.unwrap_or(style.align);
         let margin = style.margin.clamp(0.0, 0.45) * h as f32;
+        let outline = (style.outline * scale).clamp(0.0, MAX_OUTLINE_RADIUS);
+        let grow = outline.ceil() + 1.0;
+        let edge = grow;
         let top = match (line_override, style.anchor) {
             (Some(f), _) => (f * h as f32).min(h as f32 - block_h),
             (None, CaptionAnchor::Top) => margin,
             (None, CaptionAnchor::Middle) => (h as f32 - block_h) / 2.0,
             (None, CaptionAnchor::Bottom) => h as f32 - margin - block_h,
         }
-        .max(0.0)
+        .clamp(edge, (h as f32 - block_h - edge).max(edge))
         .round();
         let side = w as f32 * 0.05;
         let widths: Vec<f32> = lines.iter().map(|l| filmcraft_text::measure(l, &ts)).collect();
@@ -563,8 +566,9 @@ mod tests {
                 CaptionAlign::Center => (w as f32 - lw) / 2.0,
             })
             .collect();
-        let outline = (style.outline * scale).clamp(0.0, MAX_OUTLINE_RADIUS);
-        let grow = outline.ceil() + 1.0;
+        // the drawn box stays inside the frame, so a line wider than it is pulled back to the inset
+        let inset = pad_x + grow;
+        let xs: Vec<f32> = xs.into_iter().zip(&widths).map(|(x, &lw)| x.clamp(inset, (w as f32 - lw - inset).max(inset))).collect();
         let bx0 = xs.iter().zip(&widths).map(|(x, _)| x - pad_x - grow).fold(f32::MAX, f32::min).floor();
         let bx1 = xs.iter().zip(&widths).map(|(x, lw)| x + lw + pad_x + grow).fold(f32::MIN, f32::max).ceil();
         let by0 = (top - grow).floor();

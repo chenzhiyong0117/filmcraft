@@ -506,9 +506,21 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
     let copy = bool_p(p, "copy").unwrap_or(false);
     // A mixed clip + caption selection drags together: the captions keep their own tracks but
     // must land at the same time offset, in the same transaction (one undo step).
-    let mut captions: Vec<ClipId> =
-        p.get("captions").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect()).unwrap_or_default();
-    captions.dedup();
+    let mut captions: Vec<ClipId> = match p.get("captions") {
+        None => Vec::new(),
+        Some(Value::Array(a)) => {
+            let mut v: Vec<ClipId> = Vec::with_capacity(a.len());
+            for item in a {
+                let id = item.as_u64().ok_or_else(|| bad(CMD, "`captions` must be a list of caption ids"))?;
+                let c = ClipId(id);
+                if !v.contains(&c) {
+                    v.push(c);
+                }
+            }
+            v
+        }
+        Some(_) => return Err(bad(CMD, "`captions` must be a list of caption ids")),
+    };
     let caption_delta = Tick(p.get("captionDelta").and_then(Value::as_i64).unwrap_or(caption_delta.0));
     // an Option-drag copies the clips; a caption cannot be copied onto itself on its track, so the
     // captions stay put (they keep their selection)
@@ -610,12 +622,16 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
     if copy {
         return Ok(json!({"copied": copied.iter().map(|c| c.0).collect::<Vec<_>>(), "overwritten": overwritten}));
     }
-    Ok(json!({
+    let mut out = json!({
         "moved": moves.iter().map(|m| m.0.0).collect::<Vec<_>>(),
         "overwritten": overwritten,
-        "captions": captions.iter().map(|c| c.0).collect::<Vec<_>>(),
-        "captionDelta": if captions.is_empty() { 0 } else { caption_shift.0 },
-    }))
+    });
+    // only the captions that actually moved are named (a clip that just changes track leaves them)
+    if !captions.is_empty() && caption_shift != Tick::ZERO {
+        out["captions"] = json!(captions.iter().map(|c| c.0).collect::<Vec<_>>());
+        out["captionDelta"] = json!(caption_shift.0);
+    }
+    Ok(out)
 }
 
 /// Slip clips together: the media delta of each clip is scaled down by the same factor so that the
