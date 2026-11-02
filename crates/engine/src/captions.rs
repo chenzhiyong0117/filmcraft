@@ -175,6 +175,7 @@ pub fn copy(s: &mut Session) -> usize {
     s.state.caption_clipboard = picked.into_iter().map(|(ti, c)| (ti, filmcraft_project::Caption { start: c.start - min, ..c })).collect();
     s.state.clipboard.clear();
     s.state.clipboard_markers.clear();
+    s.state.clipboard_transitions.clear();
     s.state.caption_clipboard.len()
 }
 
@@ -251,6 +252,7 @@ fn track_json(s: &Session, t: &CaptionTrack, index: usize) -> Value {
             "lineSpacing": t.style.line_spacing, "outline": t.style.outline, "outlineColor": hex(t.style.outline_color),
             "shadow": t.style.shadow, "shadowColor": hex(t.style.shadow_color),
             "shadowOffsetX": t.style.shadow_offset_x, "shadowOffsetY": t.style.shadow_offset_y, "shadowSoftness": t.style.shadow_softness,
+            "fontStyle": t.style.font_style,
         },
         "captions": t.captions.iter().map(|c| caption_json(s, c)).collect::<Vec<_>>(),
     })
@@ -355,7 +357,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "Caption Track Style",
             &[],
             None,
-            r##"{"track":id|"C1","font":str?,"style":str?,"size":f32?,"color":"#rrggbb[aa]"?,"background":bool?,"backgroundColor":"#rrggbbaa"?,"align":"left|center|right"?,"anchor":"top|middle|bottom"?,"margin":0..0.45 (fraction of frame height)?,"offsetX":-1..1 (fraction of frame width)?,"offsetY":-1..1 (fraction of frame height)?,"lineSpacing":f32?,"outline":f32?,"outlineColor":str?,"shadow":bool?,"shadowColor":str?,"shadowOffsetX":f64?,"shadowOffsetY":f64?,"shadowSoftness":f64?,"reset":bool?,"merge":bool? (share one undo step with the previous style change, for a live drag)}"##,
+            r##"{"track":id|"C1","font":str?,"style":str?,"fontStyle":str="SemiBold" (Regular, Medium, Bold…)?,"size":f32?,"color":"#rrggbb[aa]"?,"background":bool?,"backgroundColor":"#rrggbbaa"?,"align":"left|center|right"?,"anchor":"top|middle|bottom"?,"margin":0..0.45 (fraction of frame height)?,"offsetX":-1..1 (fraction of frame width)?,"offsetY":-1..1 (fraction of frame height)?,"lineSpacing":f32?,"outline":f32?,"outlineColor":str?,"shadow":bool?,"shadowColor":str?,"shadowOffsetX":f64?,"shadowOffsetY":f64?,"shadowSoftness":f64?,"reset":bool?,"merge":bool? (share one undo step with the previous style change, for a live drag)}"##,
             has_caption_track,
             |s, p| {
                 let tid = track_param(s, p).ok_or_else(|| {
@@ -383,6 +385,9 @@ pub fn commands() -> Vec<CommandSpec> {
                     if let Some(v) = str_p(&p, "style") {
                         let v = v.trim();
                         y.style = if v.is_empty() { CaptionStyle::default().style } else { v.to_string() };
+                    }
+                    if let Some(v) = str_p(&p, "fontStyle") {
+                        y.font_style = v.trim().to_string();
                     }
                     if let Some(v) = f64_p(&p, "size") {
                         y.size = (v as f32).clamp(4.0, 400.0);
