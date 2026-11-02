@@ -473,11 +473,8 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
     let late = plan.iter().map(|m| -m.2).max().unwrap_or(0).max(0);
     // `captions` ride along by the first listed clip's offset (shift above included), so subtitles
     // stay on the dialogue they belong to
-    let caption_ids: Vec<ClipId> = p
-        .get("captions")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect())
-        .unwrap_or_default();
+    let caption_ids: Vec<ClipId> =
+        p.get("captions").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect()).unwrap_or_default();
     if !caption_ids.is_empty() && bool_p(p, "copy").unwrap_or(false) {
         return Err(bad(CMD, "`captions` cannot be combined with `copy`"));
     }

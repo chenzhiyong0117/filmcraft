@@ -882,10 +882,10 @@ fn commit_drag(app: &mut FilmcraftApp, ctx: &egui::Context, resp: &egui::Respons
                     // in the same command, so the whole drag is one edit and one undo step
                     let copying = copy || mods.alt;
                     let captions = track_select_drag_captions(app, copying, mods.command);
-                    Some(app.session.execute(
-                        "timeline.move",
-                        json!({"moves": moves, "insert": mods.command, "linked": false, "copy": copying, "captions": captions}),
-                    ))
+                    Some(
+                        app.session
+                            .execute("timeline.move", json!({"moves": moves, "insert": mods.command, "linked": false, "copy": copying, "captions": captions})),
+                    )
                 }
                 Drag::Trim { clip, edge, mode, delta, linked, .. } if delta != Tick::ZERO => Some(app.session.execute(
                     "timeline.trim",
