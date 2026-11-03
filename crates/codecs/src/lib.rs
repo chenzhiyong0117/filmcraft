@@ -32,6 +32,7 @@ pub mod mp4;
 pub mod mpeg;
 pub mod mxf;
 pub mod ogg;
+pub mod png_mov;
 mod stream_color;
 pub mod video;
 mod webm_alpha;
@@ -77,7 +78,7 @@ impl From<CodecError> for filmcraft_media::MediaError {
 }
 
 /// Our own (pure-Rust) decoders, in the order they are tried.
-const BUILTIN_FACTORIES: [VideoDecoderFactory; 11] = [
+const BUILTIN_FACTORIES: [VideoDecoderFactory; 12] = [
     video::h264_factory,
     video::hevc_factory,
     video::vp8_factory,
@@ -89,6 +90,7 @@ const BUILTIN_FACTORIES: [VideoDecoderFactory; 11] = [
     video::mjpeg_factory,
     video::mpeg2_factory,
     video::raw_factory,
+    png_mov::factory,
 ];
 
 fn factories() -> &'static RwLock<Vec<VideoDecoderFactory>> {
@@ -117,7 +119,40 @@ pub fn make_video_decoder(entry: &filmcraft_isobmff::SampleEntry) -> Result<Box<
             return r;
         }
     }
-    Err(CodecError::Unsupported(format!("no decoder for {} video", entry.codec.name())))
+    Err(unsupported(entry))
+}
+
+/// A name for a codec we have no `CodecConfig` variant for: the ones we meet often enough to name
+/// (`png ` tracks decode; `rle ` ones don't), so logs and slates say "QuickTime Animation" instead
+/// of "unknown".
+pub(crate) fn unknown_codec_name(fourcc: [u8; 4]) -> Option<&'static str> {
+    Some(match &fourcc {
+        b"png " => "PNG",
+        b"rle " => "QuickTime Animation",
+        b"raw " => "Uncompressed RGB",
+        b"2vuy" => "Uncompressed YUV 4:2:2",
+        b"v210" => "Uncompressed YUV 4:2:2 10-bit",
+        b"vp08" => "VP8",
+        b"BGRA" | b"ARGB" | b"RGBA" => "Uncompressed RGB 32-bit",
+        _ => return None,
+    })
+}
+
+/// Why no decoder took a sample entry: name the codec, and for one we don't know by name give its
+/// four-character code, so a log or a slate says `rle ` rather than "unknown".
+fn unsupported(entry: &filmcraft_isobmff::SampleEntry) -> CodecError {
+    match &entry.codec {
+        filmcraft_isobmff::CodecConfig::Unknown { fourcc, .. } => {
+            // a fourcc pads with spaces (`rle `): keep them in the log, drop them from the message
+            let tag: String = fourcc.0.iter().map(|&c| if c.is_ascii_graphic() || c == b' ' { c as char } else { '?' }).collect();
+            let tag = tag.trim_end();
+            match unknown_codec_name(fourcc.0) {
+                Some(name) => CodecError::Unsupported(format!("no decoder for {name} video (fourcc {tag:?})")),
+                None => CodecError::Unsupported(format!("no decoder for video (fourcc {tag:?})")),
+            }
+        }
+        codec => CodecError::Unsupported(format!("no decoder for {} video", codec.name())),
+    }
 }
 
 /// Create one of our own (software) decoders for a sample entry, skipping registered factories:
@@ -128,7 +163,7 @@ pub fn software_video_decoder(entry: &filmcraft_isobmff::SampleEntry) -> Result<
             return r;
         }
     }
-    Err(CodecError::Unsupported(format!("no decoder for {} video", entry.codec.name())))
+    Err(unsupported(entry))
 }
 
 /// Openers for the engine's media pool (MP4/MOV, Matroska/WebM, MXF, Ogg Opus/Vorbis, MPEG TS/PS and
