@@ -119,7 +119,18 @@ pub fn make_video_decoder(entry: &filmcraft_isobmff::SampleEntry) -> Result<Box<
             return r;
         }
     }
-    Err(unsupported(entry))
+    Err(CodecError::Unsupported(format!("no decoder for {} video", undecodable_codec(entry))))
+}
+
+/// Create one of our own (software) decoders for a sample entry, skipping registered factories:
+/// what a hardware decoder falls back to when it fails mid-stream.
+pub fn software_video_decoder(entry: &filmcraft_isobmff::SampleEntry) -> Result<Box<dyn VideoDecoder>> {
+    for f in BUILTIN_FACTORIES {
+        if let Some(r) = f(entry) {
+            return r;
+        }
+    }
+    Err(CodecError::Unsupported(format!("no decoder for {} video", undecodable_codec(entry))))
 }
 
 /// A name for a codec we have no `CodecConfig` variant for: the ones we meet often enough to name
@@ -138,32 +149,14 @@ pub(crate) fn unknown_codec_name(fourcc: [u8; 4]) -> Option<&'static str> {
     })
 }
 
-/// Why no decoder took a sample entry: name the codec, and for one we don't know by name give its
-/// four-character code, so a log or a slate says `rle ` rather than "unknown".
-fn unsupported(entry: &filmcraft_isobmff::SampleEntry) -> CodecError {
+/// The codec a "no decoder" error names: the short codec name, or for a sample entry the parser
+/// keeps as `Unknown`, the label probe shows, so the message reads "no decoder for Apple
+/// Intermediate Codec video" rather than "no decoder for unknown video" (#3646).
+fn undecodable_codec(entry: &filmcraft_isobmff::SampleEntry) -> String {
     match &entry.codec {
-        filmcraft_isobmff::CodecConfig::Unknown { fourcc, .. } => {
-            // a fourcc pads with spaces (`rle `): keep them in the log, drop them from the message
-            let tag: String = fourcc.0.iter().map(|&c| if c.is_ascii_graphic() || c == b' ' { c as char } else { '?' }).collect();
-            let tag = tag.trim_end();
-            match unknown_codec_name(fourcc.0) {
-                Some(name) => CodecError::Unsupported(format!("no decoder for {name} video (fourcc {tag:?})")),
-                None => CodecError::Unsupported(format!("no decoder for video (fourcc {tag:?})")),
-            }
-        }
-        codec => CodecError::Unsupported(format!("no decoder for {} video", codec.name())),
+        c @ filmcraft_isobmff::CodecConfig::Unknown { .. } => mp4::codec_label(c),
+        c => c.name().to_string(),
     }
-}
-
-/// Create one of our own (software) decoders for a sample entry, skipping registered factories:
-/// what a hardware decoder falls back to when it fails mid-stream.
-pub fn software_video_decoder(entry: &filmcraft_isobmff::SampleEntry) -> Result<Box<dyn VideoDecoder>> {
-    for f in BUILTIN_FACTORIES {
-        if let Some(r) = f(entry) {
-            return r;
-        }
-    }
-    Err(unsupported(entry))
 }
 
 /// Openers for the engine's media pool (MP4/MOV, Matroska/WebM, MXF, Ogg Opus/Vorbis, MPEG TS/PS and
