@@ -3741,3 +3741,17 @@
 	When enabled, GIF transparency is on/off: alpha below 128 is transparent; 128 and above is opaque.	启用后，GIF 透明度为开/关模式：alpha 低于 128 为透明；128 及以上为不透明。
 	{frames} frames ({seconds} s)	{frames} 帧（{seconds} 秒）
 	{name} already exists, so nothing was exported. To replace it, choose it in the save dialog.	{name} 已存在，因此未导出任何内容。要替换它，请在保存对话框中选择它。
+	Search fonts	搜索字体
+	Recently used	最近使用
+	All fonts	全部字体
+	No font matches the search	没有匹配的字体
+font style	Regular	常规
+font style	Bold	粗体
+font style	Italic	斜体
+font style	Bold Italic	粗斜体
+font style	Light	细体
+font style	Medium	中等
+font style	SemiBold	半粗
+font style	Black	特粗
+font style	Thin	极细
+font style	Heavy	重体
