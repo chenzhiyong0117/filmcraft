@@ -347,8 +347,34 @@ fn interact_block(
                         vec![id]
                     };
                     // Option held on the drop copies (Premiere: Option-drag duplicates)
-                    let cmd = if ctx.input(|i| i.modifiers.alt) { "captions.duplicate" } else { "captions.move" };
-                    actions.push((cmd.into(), json!({"captions": sel, "delta": d})));
+                    if ctx.input(|i| i.modifiers.alt) {
+                        actions.push(("captions.duplicate".into(), json!({"captions": sel, "delta": d})));
+                    } else {
+                        // A marquee can also have picked up clips: dragging any selected caption
+                        // then moves the whole selection, clips and captions by the same offset,
+                        // in the same command (one edit, one undo step).
+                        let moves: Vec<Value> = app
+                            .session
+                            .state
+                            .selection
+                            .iter()
+                            .filter_map(|c| seq.find_item(*c).map(|(tid, it)| json!({"clip": c.0, "track": tid.0, "time": it.start.0 + d})))
+                            .collect();
+                        if moves.is_empty() {
+                            actions.push(("captions.move".into(), json!({"captions": sel, "delta": d})));
+                        } else {
+                            let caps: Vec<u64> = app
+                                .session
+                                .state
+                                .caption_selection
+                                .iter()
+                                .filter_map(|c| seq.find_caption(*c).map(|(tid, _)| (c.0, tid)))
+                                .filter(|(_, tid)| seq.caption_track(*tid).is_some_and(|t| !t.locked))
+                                .map(|(c, _)| c)
+                                .collect();
+                            actions.push(("timeline.move".into(), json!({"moves": moves, "linked": false, "captions": caps, "captionDelta": d})));
+                        }
+                    }
                 }
                 1 => actions.push(("captions.trim".into(), json!({"caption": id, "edge": "in", "delta": d}))),
                 _ => actions.push(("captions.trim".into(), json!({"caption": id, "edge": "out", "delta": d}))),

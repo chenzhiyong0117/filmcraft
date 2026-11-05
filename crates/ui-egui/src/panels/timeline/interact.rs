@@ -155,6 +155,29 @@ fn marquee_clips(seq: &Sequence, layout: &Layout, r: Rect) -> Vec<ClipId> {
         .collect()
 }
 
+/// The captions a marquee rectangle touches, on the caption rows it crosses.
+fn marquee_captions(seq: &Sequence, layout: &Layout, r: Rect) -> Vec<ClipId> {
+    if seq.caption_tracks.is_empty() || !layout.caption_area.intersects(r) {
+        return Vec::new();
+    }
+    let (a, b) = (layout.tick_at(r.min.x), layout.tick_at(r.max.x));
+    let rows = crate::panels::timeline_captions::rows(layout.caption_area, seq.caption_tracks.len());
+    seq.caption_tracks
+        .iter()
+        .zip(rows)
+        .filter(|(_, row)| row.intersects(r))
+        .flat_map(|(tr, _)| tr.captions.iter().filter(|c| c.start < b && c.end() > a).map(|c| c.id))
+        .collect()
+}
+
+/// A marquee that touches clips and captions hands both to one `timeline.select`, with the linked
+/// partners of the clips (unless Alt keeps it individual).
+fn select_box(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, r: Rect, add: bool, individual: bool) {
+    let caps: Vec<u64> = marquee_captions(seq, layout, r).iter().map(|c| c.0).collect();
+    let ids: Vec<u64> = marquee_clips(seq, layout, r).iter().map(|c| c.0).collect();
+    let _ = app.session.execute("timeline.select", json!({"clips": ids, "captions": caps, "add": add, "linked": !individual}));
+}
+
 /// A move previews the same track-lock restrictions as its eventual edit.
 fn drag_is_locked(session: &filmcraft_engine::Session, seq: &Sequence, drag: &Drag) -> bool {
     let clips = match drag {
@@ -553,6 +576,7 @@ fn start_drag(
                 Some(Drag::Marquee {
                     start: MarqueeAnchor::new(layout, t, scroll, p),
                     before: app.session.state.selection.clone(),
+                    before_caps: app.session.state.caption_selection.clone(),
                     add: mods.shift || mods.command,
                     individual: mods.alt,
                 })
@@ -605,7 +629,7 @@ fn select_track_select_captions(app: &mut FilmcraftApp, seq: &Sequence, t: Tick,
 /// The captions a Track Select drag moves with its clips, in the same undo step. None when the drop
 /// copies (Option) or inserts (Cmd): an insert already carries the sync-locked caption tracks.
 fn track_select_drag_captions(app: &FilmcraftApp, copying: bool, inserting: bool) -> Vec<u64> {
-    if copying || inserting || !matches!(app.ui.tool, Tool::TrackSelectForward | Tool::TrackSelectBackward) {
+    if copying || inserting {
         return Vec::new();
     }
     app.session.state.caption_selection.iter().map(|c| c.0).collect()
@@ -631,8 +655,9 @@ fn escape_cancel(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     v.a_scroll = start_a;
                 }
                 // the live box (#1028) already changed the selection: put back the one the drag began with
-                Drag::Marquee { before, .. } => {
+                Drag::Marquee { before, before_caps, .. } => {
                     app.session.state.selection = before;
+                    app.session.state.caption_selection = before_caps;
                 }
                 _ => {}
             }
@@ -764,12 +789,12 @@ fn drag_update(app: &mut FilmcraftApp, ui: &mut egui::Ui, resp: &egui::Response,
                 Some(Drag::WorkArea { edge, from, start, end })
             }
             Drag::Volume(v) => Some(Drag::Volume(crate::panels::timeline_volume::drag(app, ui, seq, layout, v, p.y))),
-            Drag::Marquee { start, before, add, individual } => {
+            Drag::Marquee { start, before, before_caps, add, individual } => {
                 let r = start.rect_to(layout, p);
                 ui.painter().rect_filled(r, 0.0, Color32::from_white_alpha(18));
                 ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_white_alpha(140)), StrokeKind::Inside);
-                // the clips in the box are selected as it grows and shrinks; only the release runs
-                // the command, so the drag is one selection change
+                // what the box touches is selected as it grows and shrinks, clips and captions
+                // together; only the release runs the command, so the drag is one selection change
                 let mut sel = if add { before.clone() } else { Vec::new() };
                 let clips = marquee_clips(seq, layout, r);
                 let clips = if individual { clips } else { filmcraft_engine::commands::with_links(&app.session, &clips) };
@@ -778,8 +803,15 @@ fn drag_update(app: &mut FilmcraftApp, ui: &mut egui::Ui, resp: &egui::Response,
                         sel.push(c);
                     }
                 }
+                let mut caps = if add { before_caps.clone() } else { Vec::new() };
+                for c in marquee_captions(seq, layout, r) {
+                    if !caps.contains(&c) {
+                        caps.push(c);
+                    }
+                }
                 app.session.state.selection = sel;
-                Some(Drag::Marquee { start, before, add, individual })
+                app.session.state.caption_selection = caps;
+                Some(Drag::Marquee { start, before, before_caps, add, individual })
             }
             other => Some(other),
         };
@@ -831,8 +863,12 @@ fn commit_drag(app: &mut FilmcraftApp, ctx: &egui::Context, resp: &egui::Respons
                         .filter(|c| seen.insert(**c))
                         .filter_map(|c| seq.find_item(*c).map(|(tid, it)| json!({"clip": c.0, "track": to(tid), "time": (it.start + offset).max(Tick::ZERO).0})))
                         .collect();
-                    // Option held while dropping copies (Premiere: Option-drag duplicates)
+                    // Option held while dropping copies (Premiere: Option-drag duplicates). Read
+                    // the key at the drop, not on the last drag frame: letting go of Option first
+                    // then makes the drop move, which the Option snap bypass relies on.
                     let copying = copy || mods.alt;
+                    // captions selected with the clips (a marquee across both) ride along in the
+                    // same command, so the whole drag is one edit and one undo step
                     let captions = track_select_drag_captions(app, copying, mods.command);
                     Some(app.session.execute("timeline.move", json!({"moves": moves, "insert": mods.command, "linked": false, "copy": copying, "captions": captions})))
                 }
@@ -856,13 +892,14 @@ fn commit_drag(app: &mut FilmcraftApp, ctx: &egui::Context, resp: &egui::Respons
                     let moved = seq.work_area.is_some_and(|w| (w.start, w.end()) != (start, end));
                     moved.then(|| app.session.execute("sequence.setWorkArea", json!({"start": start.0, "end": end.0})))
                 }
-                Drag::Marquee { start, before, add, individual } => {
+                Drag::Marquee { start, before, before_caps, add, individual } => {
                     app.session.state.selection = before;
+                    app.session.state.caption_selection = before_caps;
                     // egui ends a drag on Escape: that cancels the box, as in the Project panel
                     match resp.interact_pointer_pos() {
                         Some(end) if !ctx.input(|i| i.key_pressed(egui::Key::Escape)) => {
-                            let ids: Vec<u64> = marquee_clips(seq, layout, start.rect_to(layout, end)).iter().map(|c| c.0).collect();
-                            Some(app.session.execute("timeline.select", json!({"clips": ids, "add": add, "linked": !individual})))
+                            select_box(app, seq, layout, start.rect_to(layout, end), add, individual);
+                            None
                         }
                         _ => None,
                     }
@@ -1421,7 +1458,7 @@ mod marquee_tests {
     fn layout(v_scroll: f32, a_scroll: f32) -> Layout {
         let content = Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 600.0));
         let ruler = Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 20.0));
-        Layout { content, ruler, rows: Vec::new(), pps: 100.0, scroll: 0.0, split_y: 300.0, v_scroll, a_scroll }
+        Layout { content, ruler, rows: Vec::new(), pps: 100.0, scroll: 0.0, split_y: 300.0, v_scroll, a_scroll, caption_area: Rect::NOTHING }
     }
 
     /// #2978: V1 scrolled down under the audio tracks, behind A1. A box drawn on A1 takes A1's

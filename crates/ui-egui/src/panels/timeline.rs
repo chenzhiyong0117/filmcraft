@@ -257,6 +257,8 @@ pub enum Drag {
     Marquee {
         start: MarqueeAnchor,
         before: Vec<ClipId>,
+        /// The caption selection when the drag began, restored on Escape and kept by Shift.
+        before_caps: Vec<ClipId>,
         add: bool,
         individual: bool,
     },
@@ -336,7 +338,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         rows.push(Row { track: tr.id, kind: TrackKind::Audio, index: i, rect, lane: app.ui.timeline.track_lanes.contains_key(&tr.id.0) });
     }
     let (v_scroll, a_scroll) = (app.ui.timeline.v_scroll, app.ui.timeline.a_scroll);
-    let layout = Layout { content, ruler, rows: rows.clone(), pps, scroll, split_y, v_scroll, a_scroll };
+    let layout = Layout { content, ruler, rows: rows.clone(), pps, scroll, split_y, v_scroll, a_scroll, caption_area };
     app.tl.layout = Some(layout.clone());
 
     // ---- backgrounds
@@ -1010,6 +1012,7 @@ mod waveform_drag_anchor_tests {
             split_y: 0.0,
             v_scroll: 0.0,
             a_scroll: 0.0,
+            caption_area: Rect::NOTHING,
         }
     }
 
@@ -1195,6 +1198,7 @@ mod new_track_tests {
             split_y: 200.0,
             v_scroll: 0.0,
             a_scroll: 0.0,
+            caption_area: Rect::NOTHING,
         };
         let at = |y| new_track_at(&seq, &layout, y, 50.0, 50.0);
         assert_eq!(at(40.0), Some((TrackKind::Video, Rect::from_min_max(pos2(0.0, 100.0), pos2(800.0, 150.0)))));
@@ -1232,6 +1236,7 @@ mod new_track_tests {
             split_y,
             v_scroll: 0.0,
             a_scroll: 0.0,
+            caption_area: Rect::NOTHING,
         };
         let at = |y: f32| layout.row_at(y).map(|r| r.track.0);
         assert_eq!(at(260.0), Some(1), "V1 above the divider");
@@ -1275,6 +1280,7 @@ mod new_track_tests {
             split_y: 150.0,
             v_scroll: 0.0,
             a_scroll: 0.0,
+            caption_area: Rect::NOTHING,
         };
         assert_eq!(new_track_at(&seq, &layout, 10.0, 50.0, 50.0), Some((TrackKind::Video, Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 50.0)))));
         // scrolled to the bottom, V1..V3 fill the area as before

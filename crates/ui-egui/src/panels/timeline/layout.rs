@@ -24,6 +24,8 @@ pub struct Layout {
     /// before the next frame lays the rows out again (and clamps them).
     pub v_scroll: f32,
     pub a_scroll: f32,
+    /// The band the caption track rows take, above the video tracks (empty when there are none).
+    pub caption_area: Rect,
 }
 
 impl Layout {

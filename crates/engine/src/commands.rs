@@ -3169,44 +3169,77 @@ fn build() -> Vec<CommandSpec> {
                 s.execute(if ripple { "edit.rippleDelete" } else { "edit.clear" }, p.clone())
             }
         ),
-        cmd!("timeline.select", "Select Clips", [], None, r#"{"clips":[id],"transitions":[id]?,"add":bool,"toggle":bool,"linked":bool?}"#, has_seq, |s, p| {
-            if let Some(ids) = p.get("transitions") {
-                return select_transitions(s, ids, bool_p(p, "add").unwrap_or(false), bool_p(p, "toggle").unwrap_or(false));
-            }
-            let clips: Vec<ClipId> =
-                p.get("clips").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect()).unwrap_or_default();
-            // a toggle adds or removes the requested clips as a whole, decided once from their own
-            // selection state, so a partly selected group never ends up half flipped
-            let toggle_off = !clips.is_empty() && clips.iter().all(|c| s.state.selection.contains(c));
-            let clips = if bool_p(p, "linked").unwrap_or(true) { with_groups_and_links(s, &clips) } else { clips };
-            // selecting clips leaves trim mode (Premiere: clip and edit point selections are exclusive)
-            s.state.edit_points.clear();
-            s.state.trim_shift = Default::default();
-            // and a clip selection replaces a transition or gap one
-            s.state.transition_selection.clear();
-            s.state.gap_selection = None;
-            if bool_p(p, "toggle").unwrap_or(false) && toggle_off {
-                s.state.selection.retain(|x| !clips.contains(x));
-            } else if bool_p(p, "toggle").unwrap_or(false) || bool_p(p, "add").unwrap_or(false) {
-                for c in clips {
-                    if !s.state.selection.contains(&c) {
-                        s.state.selection.push(c);
-                    }
+        cmd!(
+            "timeline.select",
+            "Select Clips",
+            [],
+            None,
+            r#"{"clips":[id],"captions":[id]?,"transitions":[id]?,"add":bool,"toggle":bool,"linked":bool?}"#,
+            has_seq,
+            |s, p| {
+                if let Some(ids) = p.get("transitions") {
+                    return select_transitions(s, ids, bool_p(p, "add").unwrap_or(false), bool_p(p, "toggle").unwrap_or(false));
                 }
-            } else {
-                // a raw (unlinked) id list may repeat a clip; keep the first of each, in order
-                let mut seen = std::collections::HashSet::with_capacity(clips.len());
-                let mut unique: Vec<ClipId> = Vec::with_capacity(clips.len());
-                for c in clips {
-                    if seen.insert(c) {
-                        unique.push(c);
+                let clips: Vec<ClipId> =
+                    p.get("clips").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect()).unwrap_or_default();
+                // a toggle adds or removes the requested clips as a whole, decided once from their own
+                // selection state, so a partly selected group never ends up half flipped
+                let toggle_off = !clips.is_empty() && clips.iter().all(|c| s.state.selection.contains(c));
+                let clips = if bool_p(p, "linked").unwrap_or(true) { with_groups_and_links(s, &clips) } else { clips };
+                // captions ride in the same command, so a box that crosses the caption rows and the
+                // tracks is one selection change; they follow the same add / toggle / replace rules
+                let captions: Option<Vec<ClipId>> =
+                    p.get("captions").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect());
+                let captions_toggle_off = captions.as_ref().is_some_and(|c| !c.is_empty() && c.iter().all(|c| s.state.caption_selection.contains(c)));
+                // selecting clips leaves trim mode (Premiere: clip and edit point selections are exclusive)
+                s.state.edit_points.clear();
+                s.state.trim_shift = Default::default();
+                // and a clip selection replaces a transition or gap one
+                s.state.transition_selection.clear();
+                s.state.gap_selection = None;
+                let toggle = bool_p(p, "toggle").unwrap_or(false);
+                let add = bool_p(p, "add").unwrap_or(false);
+                if toggle && toggle_off {
+                    s.state.selection.retain(|x| !clips.contains(x));
+                } else if toggle || add {
+                    for c in clips {
+                        if !s.state.selection.contains(&c) {
+                            s.state.selection.push(c);
+                        }
                     }
+                } else {
+                    // a raw (unlinked) id list may repeat a clip; keep the first of each, in order
+                    let mut seen = std::collections::HashSet::with_capacity(clips.len());
+                    let mut unique: Vec<ClipId> = Vec::with_capacity(clips.len());
+                    for c in clips {
+                        if seen.insert(c) {
+                            unique.push(c);
+                        }
+                    }
+                    s.state.selection = unique;
                 }
-                s.state.selection = unique;
-                s.state.caption_selection.clear();
+                match captions {
+                    Some(captions) if toggle && captions_toggle_off => s.state.caption_selection.retain(|x| !captions.contains(x)),
+                    Some(captions) if toggle || add => {
+                        for c in captions {
+                            if !s.state.caption_selection.contains(&c) {
+                                s.state.caption_selection.push(c);
+                            }
+                        }
+                    }
+                    Some(captions) => {
+                        let mut seen = std::collections::HashSet::with_capacity(captions.len());
+                        s.state.caption_selection = captions.into_iter().filter(|c| seen.insert(*c)).collect();
+                    }
+                    None if !toggle && !add => s.state.caption_selection.clear(),
+                    None => {}
+                }
+                Ok(json!({
+                    "selection": s.state.selection.iter().map(|c| c.0).collect::<Vec<_>>(),
+                    "captions": s.state.caption_selection.iter().map(|c| c.0).collect::<Vec<_>>(),
+                }))
             }
-            Ok(json!({"selection": s.state.selection.iter().map(|c| c.0).collect::<Vec<_>>()}))
-        }),
+        ),
         cmd!("timeline.selectGap", "Select Gap", [], None, r#"{"track":"V1"|id,"time":ticks|"frame":n|"seconds":f}"#, has_seq, select_gap),
         cmd!(
             "timeline.move",

@@ -135,6 +135,8 @@ management commands and dialog ids: offline media and relinking (`media.findMiss
 proxies (`media.createProxies`, `media.attachProxies`, `media.toggleProxies`, `proxies.*`), ingest
 (`project.ingestSettings`) and the Project Manager (`file.projectManager`, `pm.*`).
 
+**Selecting clips and captions together**: `timeline.select {clips, captions?, add?, toggle?, linked?}` (the Timeline panel's box selection) writes `selection` and `caption_selection` in one command, so a box that crosses the caption rows and the tracks is one selection change; `linked` adds the linked partners of the clips.
+
 **Moving clips**: `timeline.move {moves: [{clip, track, time}], insert?, linked?, captions?}` → `{moved: [clip ids]}`.
 `time` is ticks or a time object at the sequence rate (`{"seconds": 2}`, `{"frame": 48}`, `{"timecode": "00:00:02:00"}`),
 and an entry without a `clip`, `track` or `time` is refused by its index. With Linked Selection on (the default; `linked` overrides the toggle for one call) the linked
@@ -150,9 +152,9 @@ panel's drag passes `linked: false`, because it already lists exactly the clips 
 destinations instead (linked partners are copied too, unless `linked: false`); the result lists
 the new clips as `copied`, they are selected, and copies of linked clips are linked to each other.
 `captions: [caption id]` moves those captions by the same offset as the first listed clip, in the same undo
-step (Track Select Forward / Backward drags use it so subtitles stay with the dialogue). If they cannot go
+step (the Timeline panel passes the captions a box selected, so a mixed selection drags together). If they cannot go
 as far as the clips (they would overlap captions that stay, or one is on a locked track) the call fails and
-nothing moves; it cannot be combined with `copy`, and the result lists them as `captions`.
+nothing moves; it cannot be combined with `copy` or `insert`, and the result lists them as `captions`.
 
 **Trim mode** (`crates/engine/src/trim.rs`): `trim.selectEditPoint` / `trim.selectNearest` enter trim
 mode (the Program monitor becomes the Trim Monitor, ids `trimMonitor.*`); `trim.monitor` returns what
