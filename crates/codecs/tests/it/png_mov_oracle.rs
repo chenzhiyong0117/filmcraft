@@ -52,7 +52,7 @@ fn png_samples_decode_to_the_same_rgba_as_ffmpeg() {
 }
 
 /// A QuickTime Animation (`rle `) track has no decoder (its bitstream has no public specification,
-/// and we implement only from public specs): it must say so by name and fourcc, not "unknown".
+/// and we implement only from public specs): it must say so by name, not "unknown".
 #[test]
 fn a_codec_without_a_decoder_names_itself() {
     let ff = filmcraft_testkit::require_ffmpeg!();
@@ -65,5 +65,5 @@ fn a_codec_without_a_decoder_names_itself() {
     assert_eq!(src.info().video.as_ref().expect("a video stream").codec, "QuickTime Animation");
     let err = src.video_frame(filmcraft_media::FrameRequest::full(filmcraft_time::Tick::ZERO)).unwrap_err();
     let filmcraft_media::MediaError::Unsupported(why) = err else { panic!("expected Unsupported, got {err:?}") };
-    assert!(why.contains("rle"), "the fourcc should be named: {why}");
+    assert!(why.contains("QuickTime Animation"), "the codec should be named: {why}");
 }
