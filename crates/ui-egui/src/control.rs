@@ -725,10 +725,16 @@ pub fn save_screenshot_with_ppp(image: &egui::ColorImage, path: Option<&str>, cr
             Err(e) => json!({"ok": false, "error": e}),
         };
     }
-    let path = path.map(str::to_string).unwrap_or_else(|| {
-        let name = if raw { "filmcraft-screenshot.rgba" } else { "filmcraft-screenshot.png" };
-        filmcraft_engine::temp_dir().join(name).to_string_lossy().to_string()
-    });
+    let path = match path {
+        Some(p) => p.to_string(),
+        None => {
+            let name = if raw { "filmcraft-screenshot.rgba" } else { "filmcraft-screenshot.png" };
+            match filmcraft_engine::private_temp_dir() {
+                Ok(d) => d.join(name).to_string_lossy().to_string(),
+                Err(e) => return json!({"ok": false, "error": format!("no private temporary folder: {e}")}),
+            }
+        }
+    };
     if raw {
         // A recording tool reads the frames itself: skip the PNG encode, which is the slow part.
         return match std::fs::write(&path, &rgba) {
